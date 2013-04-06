@@ -24,6 +24,7 @@ from offlineimap.repository.IMAP import IMAPRepository, MappedIMAPRepository
 from offlineimap.repository.Gmail import GmailRepository
 from offlineimap.repository.Maildir import MaildirRepository
 from offlineimap.repository.LocalStatus import LocalStatusRepository
+from offlineimap.repository.Couch import CouchRepository
 from offlineimap.error import OfflineImapError
 
 
@@ -41,12 +42,14 @@ class Repository(object):
             name = account.getconf('remoterepository')
             # We don't support Maildirs on the remote side.
             typemap = {'IMAP': IMAPRepository,
-                       'Gmail': GmailRepository}
+                       'Gmail': GmailRepository,
+                       'Couch': CouchRepository}
 
         elif reqtype == 'local':
             name = account.getconf('localrepository')
             typemap = {'IMAP': MappedIMAPRepository,
-                       'Maildir': MaildirRepository}
+                       'Maildir': MaildirRepository,
+                       'Couch': CouchRepository}
 
         elif reqtype == 'status':
             # create and return a LocalStatusRepository
@@ -84,4 +87,3 @@ class Repository(object):
         :param regtype: 'remote', 'local', or 'status'
         """
         pass
-
