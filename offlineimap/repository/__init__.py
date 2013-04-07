@@ -24,8 +24,18 @@ from offlineimap.repository.IMAP import IMAPRepository, MappedIMAPRepository
 from offlineimap.repository.Gmail import GmailRepository
 from offlineimap.repository.Maildir import MaildirRepository
 from offlineimap.repository.LocalStatus import LocalStatusRepository
-from offlineimap.repository.Couch import CouchRepository
 from offlineimap.error import OfflineImapError
+
+
+# only import CouchDB backend, if DesktopCouch is available
+couchdb_available = False
+try:
+    import desktopcouch.records.server
+    couchdb_available = True
+except ImportError:
+    pass
+if couchdb_available:
+    from offlineimap.repository.Couch import CouchRepository
 
 
 class Repository(object):
@@ -42,14 +52,12 @@ class Repository(object):
             name = account.getconf('remoterepository')
             # We don't support Maildirs on the remote side.
             typemap = {'IMAP': IMAPRepository,
-                       'Gmail': GmailRepository,
-                       'Couch': CouchRepository}
+                       'Gmail': GmailRepository}
 
         elif reqtype == 'local':
             name = account.getconf('localrepository')
             typemap = {'IMAP': MappedIMAPRepository,
-                       'Maildir': MaildirRepository,
-                       'Couch': CouchRepository}
+                       'Maildir': MaildirRepository}
 
         elif reqtype == 'status':
             # create and return a LocalStatusRepository
@@ -59,6 +67,10 @@ class Repository(object):
         else:
             errstr = "Repository type %s not supported" % reqtype
             raise OfflineImapError(errstr, OfflineImapError.ERROR.REPO)
+
+	if reqtype == 'local':
+	    if couchdb_available:
+	        typemap['Couch'] = CouchRepository
 
         # Get repository type
         config = account.getconfig()
