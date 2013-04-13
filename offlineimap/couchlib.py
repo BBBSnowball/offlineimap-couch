@@ -94,7 +94,7 @@ class Couch(object):
             return []
 
         options = options.split("&")
-        return map(options, self._decode_option)
+        return map(self._decode_option, options)
 
     def _decode_option(self, option):
         if "=" in option:
@@ -104,7 +104,8 @@ class Couch(object):
             value = None
         name = name.split(":")
         name = map(urllib.unquote, name)
-        value = urllib.unquote(value)
+        if value:   # value can be None and unquote doesn't like that
+            value = urllib.unquote(value)
 
         return [name, value]
 
@@ -211,8 +212,8 @@ class MyCouch(object):
                 # warn the user, if the additional options are different from the options the user wants
                 if self._info["additional_options"] != self._canonical_couch_option_representation():
                     print "WARN The server is already running, so we cannot change its options!"
-                    print "  requested options: " + repr(additional_options)
-                    print "  used options:      " + repr(self._info["additional_options"])
+                    print "  requested options: " + self._canonical_couch_option_representation()
+                    print "  used options:      " + self._info["additional_options"]
 
         self._connect()
 
@@ -284,6 +285,7 @@ class MyCouch(object):
 
             # let's make sure that it is the right process
             # -> Erlang processes are called beam.smp (at least on my system)
+            #    However, it is "beam" on a single-processor system.
             right_name = "beam.smp"     # only a guess
             if self._info and "process_name" in self._info:
                 # We have saved the name -> use that one
@@ -545,7 +547,7 @@ class MyCouch(object):
 
         # set additional options provided by the user
         if self.additional_options:
-            for option in self._only_couch_options(self.additional_options):
+            for option in self._only_couch_options():
                 config.set(option[0][0], option[0][1], option[1])
 
         # put additional_options into self._info, so we can check whether the
@@ -573,7 +575,16 @@ class MyCouch(object):
         options.sort()
 
         # return a string because we only need to compare and store it
-        return repr(options)
+        return self._encode_options(options)
+
+    def _encode_options(self, options):
+        x = []
+        for name,value in options:
+            y = ":".join(map(urllib.quote, name))
+            if value:
+                y += "=" + urllib.quote(value)
+            x.append(y)
+        return "&".join(x)
 
     def _read_uri(self):
         urifile = self.path_for("couch.uri")
