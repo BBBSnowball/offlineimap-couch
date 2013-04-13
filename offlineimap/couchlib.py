@@ -175,6 +175,8 @@ class MyCouch(object):
 
 
     def get_option(self, name, default=None):
+        if type(name) == str:
+            name = [name]
         if not self.additional_options:
             return default
         for option in self.additional_options:
@@ -184,6 +186,11 @@ class MyCouch(object):
 
     def get_boolean_option(self, name):
         value = self.get_option(name, False)
+
+        #print "DEBUG get_boolean_option(%s), value is %s, result is %s" % \
+        #    (repr(name), repr(value), repr(value is None or value is not False and value.lower() not in ["no", "0", "false"]))
+        #print "DEBUG for options: " + repr(self.additional_options)
+
         #NOTE The value None means no value, but
         #     key is present (i.e. "?name&...").
         #     -> The value should be true in that case.
