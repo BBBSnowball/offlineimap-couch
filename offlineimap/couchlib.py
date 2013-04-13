@@ -268,7 +268,7 @@ class MyCouch(object):
     def _is_running(self):
         pid = self._read_pidfile()
         if not pid:
-            print "DEBUG not running - no pid file"
+            #print "DEBUG not running - no pid file"
             return False
 
         if psutil_available:
@@ -277,10 +277,10 @@ class MyCouch(object):
                 p = psutil.Process(pid)
                 status = p.status
                 if status == psutil.STATUS_ZOMBIE or status == psutil.STATUS_DEAD:
-                    print "DEBUG not running - status is %s" % status
+                    #print "DEBUG not running - status is %s" % status
                     return False
             except psutil.error.NoSuchProcess:
-                print "DEBUG not running - no such process"
+                #print "DEBUG not running - no such process"
                 return False
 
             # let's make sure that it is the right process
@@ -291,15 +291,15 @@ class MyCouch(object):
                 # We have saved the name -> use that one
                 right_name = self._info["process_name"]
             else:
-                print "WARN We haven't saved the name of "
+                print "WARN We haven't saved the name of the process, so we have to guess."
             if p.name != right_name:
                 # It's a different process
-                print "DEBUG not running - name is '%s' instead of '%s'" % (p.name, right_name)
+                #print "DEBUG not running - name is '%s' instead of '%s'" % (p.name, right_name)
                 return False
 
             # make sure it uses our config file (thus it isn't for a different directory)
             if self.path_for("couch.ini") not in p.cmdline:
-                print "DEBUG not running - couch.ini not in cmdline"
+                #print "DEBUG not running - couch.ini not in cmdline"
                 return False
 
             if self._info and "process_cmdline" in self._info \
@@ -314,7 +314,7 @@ class MyCouch(object):
                 p.exe
             except psutil.error.AccessDenied:
                 # not our process
-                print "DEBUG not running - not our process (different user)"
+                #print "DEBUG not running - not our process (different user)"
                 return False
 
             # We are quite confident that it is the right process
@@ -617,14 +617,6 @@ class MyCouch(object):
 
     def _connect(self):
         uri = self._read_uri()
-
-        print "DEBUG uri is '%s'" % uri
-
-        #s = re.match(".*?:([0-9]+)/?$")
-        #if s:
-        #    self.port = int(s.group(1))
-        #else:
-        #    self.port = None
 
         # add credentials
         #NOTE We don't urlencode the values because they don't contain special characters.
