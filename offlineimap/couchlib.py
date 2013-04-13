@@ -1,0 +1,655 @@
+# CouchDB wrapper that can:
+# 1. use Desktopcouch:               "desktopcouch://dbname"
+# 2. start a CouchDB in some folder: "file:///path/to/folder"
+#                                    "file:///path/to/folder#dbname?section:option=value"
+#    NOTE: Options cannot be applied after the server has been
+#          started, so make sure that you pass the same options
+#          on subsequent requests.
+# 3. use a running CouchDB instance: "http://host:port"
+
+import re
+import os
+import os.path
+import urllib
+import time
+import uuid
+
+try:
+    import psutil
+    psutil_available = True
+except ImportError:
+    print "WARN: psutil not available, please install with 'easy_install psutil' or 'apt-get install python-psutil'"
+    psutil_available = False
+
+try:
+    import couchdb
+    couchdb_available = True
+except ImportError:
+    couchdb_available = False
+
+try:
+    import desktopcouch
+    import desktopcouch.records.server
+    desktopcouch_available = True
+except ImportError:
+    desktopcouch_available = False
+
+class Couch(object):
+    __slots__ = "server", "db", "desktopcouch", "mycouch"
+
+    available = couchdb_available
+    desktopcouch_available = desktopcouch_available
+
+    _re_dbname       = "(?P<dbname>[a-zA-Z0-9_]+)"
+    _re_desktopcouch = re.compile("^desktopcouch://" + _re_dbname + "$")
+    _re_file         = re.compile("^file://(?P<dir>.*?)(?:#" + _re_dbname + ")?(?:\?(?P<options>.*))?$")
+    _re_connect      = re.compile("^(?P<url>https?://.*?)(?:[#/]" + _re_dbname + ")?$")
+
+    def __init__(self, url):
+        if not Couch.available:
+            raise ImportError("couchdb module must be available")
+
+        # these attributes may be None, if we cannot find a better value
+        # We set the default here, so we don't need to worry about that later.
+        self.desktopcouch = None
+        self.mycouch = None
+        self.db = None
+
+        # find a regular expression that matches the URL
+        m = re.match(Couch._re_desktopcouch, url)
+        if m:
+            return self._init_desktopcouch(m.group("dbname"))
+        
+        m = re.match(Couch._re_file, url)
+        if m:
+            return self._init_with_dir(m.group("dir"), m.group("dbname"), m.group("options"))
+
+        m = re.match(Couch._re_connect, url)
+        if m:
+            return self._init_connection(m.group("url"), m.group("dbname"))
+
+        raise ValueError("I don't understand that URL: " + str(url))
+
+    def _init_desktopcouch(self, dbname):
+        if not Couch.desktopcouch_available:
+            raise ImportError("desktopcouch must be available, if you use a desktopcouch:// URL")
+
+        self.desktopcouch = desktopcouch.records.server.CouchDatabase(dbname, create=True)
+        self.server = self.desktopcouch.server
+        self.db     = self.desktopcouch.db
+
+    def _init_with_dir(self, dir, dbname, options):
+        self.mycouch = MyCouch(dir, self._decode_options(options))
+        self.server   = self.mycouch.server
+        if dbname:
+            self.db = self.server.create(dbname)
+
+    def _init_connection(self, url, dbname):
+        self.server = couchdb.Server(url)
+        if dbname:
+            self.db = self.server.create(dbname)
+
+    def _decode_options(self, options):
+        if not options:
+            return []
+
+        if options == "any":
+            # caller doesn't care about the options
+            return "any"
+
+        options = options.split("&")
+        return map(options, self._decode_option)
+
+    def _decode_option(self, option):
+        name,value = option.split("=", 1)
+        name = name.split(":")
+        name = map(urllib.unquote, name)
+        value = urllib.unquote(value)
+
+        return [name, value]
+
+class MyCouchConfig(object):
+    __slots__ = "config"
+
+    def __init__(self):
+        self.config = {}
+
+    def get(self, section, name, default=None):
+        if section in self.config and name in self.config[section]:
+            return self.config[section][name]
+        else:
+            return default
+
+    def set(self, section, name, value):
+        if section not in self.config:
+            self.config[section] = {}
+        self.config[section][name] = value
+
+    def save(self, path):
+        f = open(path, "w")
+        try:
+            for section_name in self.config:
+                f.write("[%s]\n" % section_name)
+
+                section = self.config[section_name]
+                for key in section:
+                    value = section[key]
+                    #print "%s:%s = %s" % (section_name, key, value)
+
+                    #TODO can/should we escape anything?
+                    value = value.replace("\r", "").replace("\n", "")
+
+                    f.write("%s = %s\n" % (key, value))
+
+                f.write("\n")
+        finally:
+            f.close()
+
+class MyCouch(object):
+    """start a private CouchDB instance in a directory"""
+    __slots__ = "dir", "server", "uri", "credentials", "additional_options", "_info"
+
+    def __init__(self, dir, additional_options):
+        self.dir = dir
+        if additional_options == "any":
+            self.additional_options = []
+        else:
+            self.additional_options = additional_options
+
+        self.credentials = None
+        self._info       = None
+        self.server      = None
+        self.uri         = None
+
+        # we need some infos for _is_running, so we try
+        # to load them now
+        self._read_info()
+
+        if not self._is_running():
+            self._init_dir()
+            self._start()
+        else:
+            # warn the user, if the additional options
+            # are different from the options the user wants
+            if additional_options != "any" and "additional_options" in self._info \
+                    and self._info["additional_options"] != repr(additional_options):
+                print "WARN The server is already running, so we cannot change its options!"
+                print "  requested options: " + repr(additional_options)
+                print "  used options:      " + repr(self._info["additional_options"])
+
+        self._connect()
+
+    @staticmethod
+    def escape_path(path, escape="shell"):
+        if escape == "shell":
+            return "'" + path.replace("'", "'\\''") + "'"
+        else:
+            raise ValueError("unknown escape target: " + str(escape))
+
+    def path_for(self, which, escape=False):
+        if which == "couchdb.out" or which == "couchdb.err" or which == "couchdb.log":
+            # output and log goes into log directory
+            which = "log/" + which
+        elif which in ["database", "view_index"]:
+            which = "data"  # they can use the same folder (this would be /var/lib/couchdb)
+
+        path = os.path.join(self.dir, which)
+        if escape:
+            path = self.escape_path(path, escape)
+        return path
+
+    def _read_pidfile(self):
+        pidfile = self.path_for("couch.pid")
+        if not os.path.isfile(pidfile):
+            return None
+
+        # wait a bit to make sure the process has time
+        # to write the file after creating it
+        time.sleep(0.1)
+        
+        f = open(pidfile, "r")
+        try:
+            pid = f.read()
+        finally:
+            f.close()
+        #print pid
+
+        # we sometimes only get a "\n"
+        #TODO Why is that? It also happens, if the process
+        #     is running.
+        if pid == "\n":
+            return None
+
+        try:
+            return int(pid)
+        except ValueError:
+            print "WARN invalid pidfile for CouchDB"
+            print "  contents of '%s': " % pidfile + repr(pid)
+            return None
+
+    def _is_running(self):
+        pid = self._read_pidfile()
+        if not pid:
+            print "DEBUG not running - no pid file"
+            return False
+
+        if psutil_available:
+            p = None
+            try:
+                p = psutil.Process(pid)
+                status = p.status
+                if status == psutil.STATUS_ZOMBIE or status == psutil.STATUS_DEAD:
+                    print "DEBUG not running - status is %s" % status
+                    return False
+            except psutil.error.NoSuchProcess:
+                print "DEBUG not running - no such process"
+                return False
+
+            # let's make sure that it is the right process
+            # -> Erlang processes are called beam.smp (at least on my system)
+            right_name = "beam.smp"     # only a guess
+            if self._info and "process_name" in self._info:
+                # We have saved the name -> use that one
+                right_name = self._info["process_name"]
+            else:
+                print "WARN We haven't saved the name of "
+            if p.name != right_name:
+                # It's a different process
+                print "DEBUG not running - name is '%s' instead of '%s'" % (p.name, right_name)
+                return False
+
+            # make sure it uses our config file (thus it isn't for a different directory)
+            if self.path_for("couch.ini") not in p.cmdline:
+                print "DEBUG not running - couch.ini not in cmdline"
+                return False
+
+            if self._info and "process_cmdline" in self._info \
+                    and repr(p.cmdline) != self._info["process_cmdline"]:
+                print "INFO Command line of CouchDB process is different than the one we expected."
+                print "  expected: " + self._info["process_cmdline"]
+                print "  actual:   " + repr(p.cmdline)
+
+            try:
+                # get executable path because that fails, if the
+                # process doesn't belong to our user (only tested on Linux)
+                p.exe
+            except psutil.error.AccessDenied:
+                # not our process
+                print "DEBUG not running - not our process (different user)"
+                return False
+
+            # We are quite confident that it is the right process
+            return True
+        else:
+            print "ERROR We need psutil to test whether CouchDB is running. Please install it! Using (very) optimistic hypothesis instead..."
+            return True
+
+    def _read_info(self):
+        """load our information about this CouchDB - credentials, ..."""
+        path = self.path_for("config.txt")
+        if not os.path.exists(path):
+            return False
+
+        f = open(path, "r")
+        content = None
+        try:
+            content = f.read()
+        finally:
+            f.close()
+
+        if not content:
+            return False
+
+        lines = content.split("\n")
+        info = {}
+        for line in lines:
+            line = line.lstrip().rstrip("\r\n")
+            if line.startswith("#") or line == "":
+                # comment or empty
+                pass
+            else:
+                key,value = line.split("=", 1)
+                key = key.strip()
+                value = value.lstrip()
+
+                info[key] = value
+
+        self._info = info
+        self.credentials = [info["user"], info["pass"]]
+
+        return True
+
+    def _save_info(self):
+        """save the values that are read by _read_info"""
+        path = self.path_for("config.txt")
+
+        if not self._info:
+            self._info = {}
+
+        if self.credentials:
+            self._info["user"] = self.credentials[0]
+            self._info["pass"] = self.credentials[1]
+
+        f = open(path, "w")
+        try:
+            for key in self._info:
+                f.write("%s = %s\n" % (key, str(self._info[key])))
+        finally:
+            f.close()
+
+        return True
+
+    def _cleanup_file(self, name):
+        path = self.path_for(name)
+        if os.path.exists(path):
+            os.remove(path)
+
+    def _start(self):
+        ### Example couchdb calls (as shown by 'ps -ef'):
+        # DesktopCouch for root
+        # /usr/bin/couchdb -n -a /etc/couchdb/default.ini -a /etc/xdg/desktop-couch/compulsory-auth.ini -a /etc/xdg/desktop-couch/default.ini -a       /root/.config/desktop-couch/desktop-couchdb.ini -b -r 0 -p       /root/.cache/desktop-couch/desktop-couchdb.pid -o       /root/.cache/desktop-couch/desktop-couchdb.stdout -e       /root/.cache/desktop-couch/desktop-couchdb.stderr -R
+        # DesktopCouch for benny
+        # /usr/bin/couchdb -n -a /etc/couchdb/default.ini -a /etc/xdg/desktop-couch/compulsory-auth.ini -a /etc/xdg/desktop-couch/default.ini -a /home/benny/.config/desktop-couch/desktop-couchdb.ini -b -r 0 -p /home/benny/.cache/desktop-couch/desktop-couchdb.pid -o /home/benny/.cache/desktop-couch/desktop-couchdb.stdout -e /home/benny/.cache/desktop-couch/desktop-couchdb.stderr -R
+        # DesktopCouch as service (on Ubuntu 12.04):
+        # /usr/bin/couchdb -a /etc/couchdb/default.ini -a /etc/couchdb/local.ini -b -r 5 -p /var/run/couchdb/couchdb.pid -o /dev/null -e /dev/null -R
+        #   --> started with '/usr/bin/couchdb -b -o /dev/null -e /dev/null -r 5'
+        #
+        #TODO what is the "-R" option?
+        #
+        # This is the JavaScript server: /usr/lib/couchdb/bin/couchjs /usr/share/couchdb/server/main.js
+        # We don't have to start it ourselves.
+
+        cmd = "/usr/bin/couchdb"
+
+        cmd += " -n"    # don't load system config (we load default.ini but not local.ini)
+        cmd += " -a /etc/couchdb/default.ini"   # load part of default config
+        cmd += " -a " + self.path_for("couch.ini", "shell")
+
+        cmd += " -b"    # spawn in background
+        cmd += " -r 1"  # respawn after 1 second, if it crashes
+        cmd += " -p " + self.path_for("couch.pid", "shell")
+        cmd += " -o " + self.path_for("couchdb.out", "shell")
+        cmd += " -e " + self.path_for("couchdb.err", "shell")
+
+        # delete old pidfile and old uri file
+        self._cleanup_file("couch.pid")
+        self._cleanup_file("couch.uri")
+
+        print "INFO: Starting CouchDB instance in %s: %s" % (self.dir, cmd)
+        os.system(cmd)
+
+        # wait for the process
+        waittime  = 20   # wait at most 20 seconds
+        sleeptime = 0.2  # try again every 200ms
+        pid = None
+        for i in xrange(int(waittime / sleeptime)):
+            pid = self._read_pidfile()
+            if pid:
+                break
+            else:
+                time.sleep(sleeptime)
+
+        if not pid:
+            # timeout -> we couldn't start the process
+            print "WARN pid file hasn't been created before the timeout, so our best bet is that the server is not starting for some reason"
+            return False
+
+        # save name of the process
+        if psutil_available:
+            p = None
+            try:
+                p = psutil.Process(pid)
+                status = p.status
+                if status == psutil.STATUS_ZOMBIE or status == psutil.STATUS_DEAD:
+                    return False
+            except psutil.error.NoSuchProcess:
+                return False
+
+            # store some information about the process, so we can later check it
+            if not self._info:
+                self._info = {}
+            self._info["process_name"]    = p.name
+            self._info["process_cmdline"] = repr(p.cmdline)
+            self._save_info()
+
+    def _mkdir_p(self, dir):
+        if not os.path.exists(dir):
+            os.makedirs(dir)
+
+    def _init_dir(self):
+        # make sure the directory exists
+        dir = self.dir
+        self._mkdir_p(dir)
+
+        # create directories for data, etc.
+        for subdir in ["log", "data"]:
+            self._mkdir_p(os.path.join(dir, subdir))
+
+        # create configuration files
+        self._create_config()
+
+    def _make_random_string(self):
+        # using the method suggested here: http://stackoverflow.com/a/621770
+        #NOTE We might want to add some more pieces of random data. If the
+        #     uuid only depends on the time, an attacker might be able to
+        #     guess it. However, the post says that it uses urandom or the
+        #     MAC address - that should be safe enough.
+        # Value shouldn't start with a number or contain an equal sign.
+        return "X" + uuid.uuid4().bytes.encode("base64").strip().rstrip("=").replace("+", "").replace("/", "")
+
+    def _create_random_credentials(self):
+        # create random user and password
+        user     = self._make_random_string()
+        password = self._make_random_string()
+        self.credentials = [user, password]
+
+        # and save them
+        self._save_info()
+
+    def _get_or_create_info(self, name, creator):
+        if not self._info:
+            self._info = {}
+
+        if name in self._info:
+            return self._info[name]
+        else:
+            value = creator()
+            self._info[name] = value
+            return value
+
+    def _get_cookie_secret(self):
+        return self._get_or_create_info("cookie_secret", self._make_random_string)
+
+    def _create_config(self):
+        if not self.credentials:
+            self._create_random_credentials()
+
+        # most configuration options are in the system default.ini which we
+        # load before our own config file
+
+        config = MyCouchConfig()
+
+        # we require users to be authenticated via HTTP basic auth or cookies
+        config.set("couch_httpd_auth", "require_valid_user", "true")
+        config.set("couch_httpd_auth", "authentication_handlers",
+                   "{couch_httpd_auth, cookie_authentication_handler}, {couch_httpd_auth, default_authentication_handler}")
+        config.set("httpd", "WWW-Authenticate", 'Basic realm="bookmarkable-user-auth"')
+
+        # bind to random port on local interface
+        config.set("httpd", "bind_address", "127.0.0.1")
+        config.set("httpd", "port", "0")
+
+        # save URI to a file, so we can find out the port
+        # https://issues.apache.org/jira/browse/COUCHDB-1338
+        # http://wiki.apache.org/couchdb/Additional_Instances
+        config.set("couchdb", "uri_file", self.path_for("couch.uri"))
+
+        # log to a file
+        config.set("log", "file", self.path_for("couchdb.log"))
+        config.set("log", "level", "info")     # or "debug"
+
+        # set database and view dir
+        config.set("couchdb", "view_index_dir", self.path_for("view_index"))
+        config.set("couchdb", "database_dir", self.path_for("database"))
+
+        # secret value for Cookie Auth
+        config.set("couch_httpd_auth", "secret", self._get_cookie_secret())
+
+        # add an admin user
+        config.set("admins", self.credentials[0], self.credentials[1])
+
+        # set additional options provided by the user
+        if self.additional_options != "any":
+            for option in self.additional_options:
+                config.set(*option)
+
+        # put additional_options into self._info, so we can check whether the
+        # user wants different options at a later time
+        self._info["additional_options"] = repr(self.additional_options)
+
+        config.save(self.path_for("couch.ini"))
+
+    def _read_uri(self):
+        urifile = self.path_for("couch.uri")
+
+        # wait for uri file to appear
+        waittime  = 20   # wait at most 20 seconds
+        sleeptime = 0.2  # try again every 200ms
+        uri = None
+        for i in xrange(int(waittime / sleeptime)):
+            if os.path.exists(urifile):
+                break
+            else:
+                time.sleep(sleeptime)
+
+        if not os.path.exists(urifile):
+            raise RuntimeError("URI file hasn't been created at '%s' within %f seconds! There might be a problem with CouchDB."
+                               % (urifile, waittime))
+
+        # process might need a moment to write the URI
+        time.sleep(0.1)
+
+        # read the file
+        f = open(urifile, "r")
+        try:
+            uri = f.read().strip()
+        finally:
+            f.close()
+
+        return uri
+
+    def _connect(self):
+        uri = self._read_uri()
+
+        print "DEBUG uri is '%s'" % uri
+
+        #s = re.match(".*?:([0-9]+)/?$")
+        #if s:
+        #    self.port = int(s.group(1))
+        #else:
+        #    self.port = None
+
+        # add credentials
+        #NOTE We don't urlencode the values because they don't contain special characters.
+        uri = uri.replace("://", "://" + self.credentials[0] + ":" + self.credentials[1] + "@")
+
+        self.uri = uri
+        self.server = couchdb.Server(uri)
+
+
+    def restart(self):
+        # read old uri
+        uri = self._read_uri()
+
+        # remove couch.uri, so we know when we have a new one
+        self._cleanup_file("couch.uri")
+
+        try:
+            self.server.resource.post("_restart", None, {"Content-Type": "application/json"})
+        except:
+            # something went wrong -> restore old pidfile
+            f = open(self.path_for("couch.pid"), "w")
+            f.write(uri)
+            f.close()
+
+            raise
+
+        # connect again
+        #WARN This will only change self.server, but it cannot change any copies of
+        #     that value. This may be a problem because the Couch class uses a copy.
+        self._connect()
+
+    def shutdown(self):
+        cmd = "/usr/bin/couchdb"
+
+        cmd += " -n"    # don't load system config (we load default.ini but not local.ini)
+        cmd += " -a /etc/couchdb/default.ini"   # load part of default config
+        cmd += " -a " + self.path_for("couch.ini", "shell")
+
+        cmd += " -d"    # shutdown
+        cmd += " -p " + self.path_for("couch.pid", "shell")
+
+        print "INFO Shutting down CouchDB instance in %s: %s" % (self.dir, cmd)
+        os.system(cmd)
+
+# for desktopcouch:
+## ; /etc/xdg/desktop-couch/compulsory-auth.ini
+## [couch_httpd_auth]
+## require_valid_user = true
+##
+## [httpd]
+## WWW-Authenticate = Basic realm="bookmarkable-user-auth"
+##
+## ; /etc/xdg/desktop-couch/default.ini
+## [replicator]
+## max_http_sessions = 1
+##
+## ; /home/benny/.config/desktop-couch/desktop-couchdb.ini
+## [oauth_consumer_secrets]
+## qBeLBWpAEs = BAFRIxQpRH
+##
+## [httpd]
+## bind_address = 127.0.0.1
+## port = 0
+## WWW-Authenticate = Basic realm="bookmarkable-user-auth"
+##
+## [oauth_token_users]
+## JuHPWrXldU = nQzeIcRNmL
+##
+## [stats]
+## rate = 
+## samples = 
+##
+## [log]
+## file = /home/benny/.cache/desktop-couch/desktop-couchdb.log
+## level = debug
+##
+## [couchdb]
+## view_index_dir = /home/benny/.local/share/desktop-couch
+## database_dir = /home/benny/.local/share/desktop-couch
+##
+## [couch_httpd_auth]
+## require_valid_user = true
+##
+## [oauth_token_secrets]
+## JuHPWrXldU = OZlWYRvGYq
+##
+## [admins]
+## nQzeIcRNmL = -hashed-6768cc6f506d72499fd42b29f38004f02bf083bb,6c1f362a63f2f130e82b4f645be001b9
+## benny = -hashed-8de60cf94ad6af89fb4321ff67ebb863ce77db60,6e3037ab5976da93f56b752bbbe6620a
+##
+## [httpd_global_handlers]
+## _stats = 
+##
+## [daemons]
+## stats_collector = 
+## stats_aggregator = 
+##
+##
+## ;/etc/couchdb/local.ini (not used by desktopcouch)
+## [couch_httpd_auth]
+## ; If you set this to true, you should also uncomment the WWW-Authenticate line
+## ; above. If you don't configure a WWW-Authenticate header, CouchDB will send
+## ; Basic realm="server" in order to prevent you getting logged out.
+## ; require_valid_user = false
+## secret = 0754bc55205ebdc6237a63d5809e91f8
