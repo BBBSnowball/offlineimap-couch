@@ -93,15 +93,15 @@ class Couch(object):
         if not options:
             return []
 
-        if options == "any":
-            # caller doesn't care about the options
-            return "any"
-
         options = options.split("&")
         return map(options, self._decode_option)
 
     def _decode_option(self, option):
-        name,value = option.split("=", 1)
+        if "=" in option:
+            name,value = option.split("=", 1)
+        else:
+            name = option
+            value = None
         name = name.split(":")
         name = map(urllib.unquote, name)
         value = urllib.unquote(value)
@@ -125,6 +125,11 @@ class MyCouchConfig(object):
             self.config[section] = {}
         self.config[section][name] = value
 
+    def delete(self, section, name):
+        # CouchDB interprets an empty value as "delete this key"
+        # see couch_config.erl, function parse_ini_file, line 240
+        self.set(section, name, "")
+
     def save(self, path):
         f = open(path, "w")
         try:
@@ -136,8 +141,26 @@ class MyCouchConfig(object):
                     value = section[key]
                     #print "%s:%s = %s" % (section_name, key, value)
 
-                    #TODO can/should we escape anything?
-                    value = value.replace("\r", "").replace("\n", "")
+                    # check the values to make sure we won't get any problems
+                    # The source of my information about the config file format is the CouchDB
+                    # source code: couch_config.erl, function parse_ini_file in commit 63b781fe85b1598de, 2013-03-12
+                    if re.match("\s+=|=\s+", value):
+                        # not possible because CouchDB splits at "\s*=\s*" and then uses implode("=")
+                        # which only adds the equal sign but not the spaces
+                        # see couch_config.erl, function parse_ini_file, line 236
+                        print "WARN The value for '%s:%s' contains a space next to an equal sign. " \
+                              + "Due to a bug in CouchDB the space will be lost" % (section_name, key)
+                    elif re.match("[ \t];", value):
+                        # not possible because CouchDB treats this as a comment
+                        print "WARN Part of this value will be treated as a comment and ignored: %s" % value
+                    elif re.match("\r\n|\n|\r|\032", value):
+                        # CouchDB supports multiline values, but it will convert newline to space,
+                        # so that doesn't help us here.
+                        print "WARN Your value contains a newline which will be replaced by a space."
+
+                        # make sure there is a space after every newline, so CouchDB will treat
+                        # it as a multiline value
+                        value = re.sub("(\r\n|\n|\r|\032) ?", "\\1 ", value)
 
                     f.write("%s = %s\n" % (key, value))
 
@@ -149,12 +172,27 @@ class MyCouch(object):
     """start a private CouchDB instance in a directory"""
     __slots__ = "dir", "server", "uri", "credentials", "additional_options", "_info"
 
+
+    def get_option(self, name, default=None):
+        if not self.additional_options:
+            return default
+        for option in self.additional_options:
+            if option[0] == name:
+                return option[1]
+        return default
+
+    def get_boolean_option(self, name):
+        value = self.get_option(name, False)
+        #NOTE The value None means no value, but
+        #     key is present (i.e. "?name&...").
+        #     -> The value should be true in that case.
+        #     Any string except "no", "0" and "false"
+        #     means True.
+        return value is None or value is not False and value.lower() not in ["no", "0", "false"]
+
     def __init__(self, dir, additional_options):
         self.dir = dir
-        if additional_options == "any":
-            self.additional_options = []
-        else:
-            self.additional_options = additional_options
+        self.additional_options = additional_options
 
         self.credentials = None
         self._info       = None
@@ -169,13 +207,12 @@ class MyCouch(object):
             self._init_dir()
             self._start()
         else:
-            # warn the user, if the additional options
-            # are different from the options the user wants
-            if additional_options != "any" and "additional_options" in self._info \
-                    and self._info["additional_options"] != repr(additional_options):
-                print "WARN The server is already running, so we cannot change its options!"
-                print "  requested options: " + repr(additional_options)
-                print "  used options:      " + repr(self._info["additional_options"])
+            if not self.get_boolean_option("any"):
+                # warn the user, if the additional options are different from the options the user wants
+                if self._info["additional_options"] != self._canonical_couch_option_representation():
+                    print "WARN The server is already running, so we cannot change its options!"
+                    print "  requested options: " + repr(additional_options)
+                    print "  used options:      " + repr(self._info["additional_options"])
 
         self._connect()
 
@@ -375,7 +412,7 @@ class MyCouch(object):
         self._cleanup_file("couch.pid")
         self._cleanup_file("couch.uri")
 
-        print "INFO: Starting CouchDB instance in %s: %s" % (self.dir, cmd)
+        print "INFO Starting CouchDB instance in %s: %s" % (self.dir, cmd)
         os.system(cmd)
 
         # wait for the process
@@ -498,16 +535,45 @@ class MyCouch(object):
         # add an admin user
         config.set("admins", self.credentials[0], self.credentials[1])
 
+        # remove stats handler
+        if not self.get_boolean_option("stats"):
+            config.delete("stats", "rate")
+            config.delete("stats", "samples")
+            config.delete("httpd_global_handlers", "_stats")
+            config.delete("daemons", "stats_collector")
+            config.delete("daemons", "stats_aggregator")
+
         # set additional options provided by the user
-        if self.additional_options != "any":
-            for option in self.additional_options:
-                config.set(*option)
+        if self.additional_options:
+            for option in self._only_couch_options(self.additional_options):
+                config.set(option[0][0], option[0][1], option[1])
 
         # put additional_options into self._info, so we can check whether the
         # user wants different options at a later time
-        self._info["additional_options"] = repr(self.additional_options)
+        self._info["additional_options"] = self._canonical_couch_option_representation()
 
         config.save(self.path_for("couch.ini"))
+
+    def _only_couch_options(self):
+        # valid option for config file: [[section, key], value]
+        # (option for self.get_option: [[name], value or None])
+        return filter(lambda opt: len(opt) == 2 and len(opt[0]) == 2, self.additional_options)
+
+    def _canonical_couch_option_representation(self):
+        #NOTE This could be improved for cases with duplicate
+        #     names, but we don't expect that to happen.
+
+        # remove any options that don't affect the CouchDB config
+        #NOTE We don't use _only_couch_options because some options
+        #     don't go into the config, but they still affect it,
+        #     e.g. stats=true.
+        options = filter(lambda opt: opt[0] not in [["any"]], self.additional_options)
+
+        # order doesn't matter, so we sort it
+        options.sort()
+
+        # return a string because we only need to compare and store it
+        return repr(options)
 
     def _read_uri(self):
         urifile = self.path_for("couch.uri")
@@ -593,6 +659,8 @@ class MyCouch(object):
         os.system(cmd)
 
 # for desktopcouch:
+#NOTE Empty values aren't useless because they can delete values set
+#     by the system config.
 ## ; /etc/xdg/desktop-couch/compulsory-auth.ini
 ## [couch_httpd_auth]
 ## require_valid_user = true
