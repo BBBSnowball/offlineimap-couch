@@ -3,43 +3,10 @@ debconf-set-selections <(echo "slrnpull        slrnpull/run_from       select  m
 aptitude install slrnpull mutt
 rm /etc/cron.daily/slrnpull
 
+cd /path/to/offlineimap-git
+python test2/fetch-testmail.py
 
-======== TEST ==========
-cat >/etc/news/slrnpull.conf <<EOF
-default 0 0 0
-gmane.mail.imap.offlineimap.general 0 0 0
-gwene.org.offlineimap.news 0 0 0
-gmane.mail.help 0 0 0
-EOF
 
-echo "news.gmane.org" >>/etc/news/server
-
-mkdir /root/test-nntp/
-slrnpull -d /root/test-nntp/ -h news.gmane.org --no-post
-
-# http://wiki.thorx.net/wiki/MailNews
-
-Maildir: new, cur, tmp -> new should be symlink to nntp subdir, others should be empty
-
-while read x ; do
-	echo "$x"
-done </etc/news/slrnpull.conf
-
-Mutt:
-set mbox_type=Maildir
-set folder=/root/test-maildir
-set mbox=+
-unmailboxes *
-mailboxes ! =gmane-offlineimap
-macro index M "T.*\n;WN" "Mark all messages as read"
-
-start Mutt, 'c' '?' choose folder, 'M', 'q'
--> Mutt has copied all messages to 'cur' directory
-
-mutt -f /root/test-maildir/gmane-offlineimap/ -Z
-======== END TEST ==========
-
-python fetch-testmail.py
 aptitude install dovecot-imapd
 
 # http://wiki.ubuntuusers.de/Dovecot
@@ -101,4 +68,18 @@ CTRL+D
 
 # => now we can use arbitrary users on localhost with password 'test'
 
-python offlineimap.py -c /root/converted-nntp-to-testmail-imap.conf
+# push those mails to a testmail account
+python offlineimap.py -c test/testmail-to-dovecot.conf
+
+# add additional test mails
+# -> too much work ;-)
+
+
+==== DON'T DO ====
+aptitude install couchdb gnome-keyring libpam-gnome-keyring
+gnome-keyring-daemon
+/usr/lib/desktopcouch/desktopcouch-get-port
+-> gnome-keyring doesn't work without a display and desktopcouch needs it
+  http://superuser.com/questions/141036/use-of-gnome-keyring-daemon-without-x
+  https://bbs.archlinux.org/viewtopic.php?id=135448
+==== END DON'T DO ====

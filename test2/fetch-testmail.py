@@ -2,7 +2,7 @@
 
 # This script fetches messages from gmane and converts
 # it from NNTP into something that looks enough like
-# maildir. Mutt is used for the conversion.
+# maildir.
 # idea: http://wiki.thorx.net/wiki/MailNews
 
 # aptitude install debconf-utils
@@ -11,12 +11,15 @@
 # aptitude install slrnpull mutt socat
 # rm /etc/cron.daily/slrnpull
 
+# call this script at the root of the offlineimap git
+
 import sys
+#import shutil
 import os
 import os.path
 pjoin = os.path.join
 
-basedir = "/root/testmail"
+basedir = "./testmail"
 server = "news.gmane.org"
 groups = {
     "gmane/mail/imap/offlineimap/general":
@@ -90,27 +93,11 @@ for group in groups:
     for dir in ["cur", "tmp"]:
         mkdir_p(pjoin(maildir, group, dir))
 
-    # NNTP stuff goes into 'new' directory
-    #NOTE We don't copy it although the files will be moved. slrnpull
-    #     won't download them again.
     nntp_dir = pjoin(basedir, "news", groups[group].replace(".", "/"))
     new_dir = pjoin(maildir, group, "new")
+
+    # NNTP stuff goes into 'new' directory
     #print "%s -> %s" % (nntp_dir, new_dir)
+    #NOTE We get some errors for the nested folders.
     if not os.path.exists(new_dir):
         os.symlink(nntp_dir, new_dir)
-
-    # call mutt to put mails into cur
-    # We use socat because mutt needs a tty. We use STDIN, so
-    # mutt's output doesn't garble our terminal. However, this means
-    # that we won't see any output. We can use STDIO to get output,
-    # as well.
-    #TODO sometimes group is "", so mutt removes all the news folders...
-    print "Running Mutt on '%s'..." % pjoin(maildir, group)
-    cmd = ("echo q | TERM=xterm socat STDIN EXEC:\"mutt -n"
-        + " -e \\'set mbox_type=Maildir\\'"
-        + " -e \\'set folder=%s\\' -e \\'set mbox=+\\' -e \\'unmailboxes *\\'"
-        + " -e \\'mailboxes ! +%s\\' -f %s\",pty,setsid,ctty")
-    cmd = cmd % (basedir, group, pjoin(maildir, group))
-    #print cmd
-    sys.stdout.flush()
-    os.system(cmd)

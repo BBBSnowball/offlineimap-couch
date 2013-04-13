@@ -32,7 +32,7 @@ try:
 except ImportError:
     from md5 import md5
 
-try: # python 2.6 has set() built in
+try:  # python 2.6 has set() built in
     set
 except NameError:
     from sets import Set as set
@@ -169,9 +169,9 @@ class CouchFolder(BaseFolder):
             "mailpath"  : self.mailpath,
             "folder"    : self.folder,
             "uid"       : uid,
-            "content64" : base64.b64encode(content),     #TODO simply fix encoding; simplejson tries to decode it from utf-8 which fails sometimes
+            "content64" : base64.b64encode(content),     # TODO simply fix encoding; simplejson tries to decode it from utf-8 which fails sometimes
             "flags"     : reduce(lambda a,b: a+b, flags, ""),
-            "rtime"     : rtime and time.strftime("%Y-%m-%d %H:%M:%S", rtime)     #TODO
+            "rtime"     : rtime and time.strftime("%Y-%m-%d %H:%M:%S", rtime)     # TODO
         }
         #print repr(x)
 
