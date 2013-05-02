@@ -22,8 +22,7 @@ from offlineimap.error import OfflineImapError
 from offlineimap.repository.Base import BaseRepository
 from stat import *
 
-from desktopcouch.records.server import CouchDatabase
-from desktopcouch.records.record import Record as CouchRecord
+from offlineimap.couchlib import Couch
 
 
 # quick-fixing bug in couchdb-python
@@ -46,31 +45,25 @@ class CouchRepository(BaseRepository):
         BaseRepository.__init__(self, reposname, account)
 
         self.mailpath = self.getconf("mailpath", reposname)
+        self.db_url = self.getconf("database")
         self.folders = None
         self.ui = getglobalui()
 
         self.connect()
-        print "blub"
 
     def connect(self):
-        print "connecting to database"
+        #print "connecting to database"
 
-        self.db = CouchDatabase("mail", create=True)
+        self.couch = Couch(self.db_url, "mail")
+        self.db = self.couch.db
 
-        # delete existing data
-        #self.db.server.delete("mail")
-        #self.db.server.create("mail")
+        self.couch.record_type_base = "http://bbbsnowball.dyndns.org/couchdb/$$"
 
-        #TODO use the official way to create the views
-        viewfn = 'function(doc) { if (doc.record_type == "http://bbbsnowball.dyndns.org/couchdb/mail_folder") emit([doc.mailpath, doc.name], doc); }'
-        self._need_view("mail", "mail_folders", viewfn)
-        viewfn = 'function(doc) { if (doc.record_type == "http://bbbsnowball.dyndns.org/couchdb/mail_item") emit([doc.mailpath, doc.folder, doc.uid], doc); }'
-        self._need_view("mail", "mail_items", viewfn)
+        #TODO I don't mind having a copy of every folder in the index, but for the mail_items that's too much
+        #     duplication. We should only emit {"_rev": doc._rev} and use include_docs=True when we query the view.
+        self.db.need_record_view("mail_folder", "mail", "mail_folders", "emit([doc.mailpath, doc.name], doc);")
+        self.db.need_record_view("mail_item",   "mail", "mail_items",   "emit([doc.mailpath, doc.folder, doc.uid], doc);")
 
-
-    def _need_view(self, dbname, viewname, viewcode):
-        if not self.db.view_exists(viewname, dbname):
-            self.db.add_view(viewname, viewcode, None, dbname)
 
     def debug(self, msg):
         self.ui.debug('couchdb', msg)
@@ -96,22 +89,32 @@ class CouchRepository(BaseRepository):
             levels will be created if they do not exist yet. 'cur',
             'tmp', and 'new' subfolders will be created in the maildir.
         """
+        # show folder creation in UI
         self.ui.makefolder(self, foldername)
         if self.account.dryrun:
             return
 
-        record = CouchRecord({
-            'mailpath': self.mailpath,
-            'name': foldername
-        }, "http://bbbsnowball.dyndns.org/couchdb/mail_folder")
-        self.db.put_record(record)
+        # create folder in database
+        record = self.db.create_record(
+            mailpath    = self.mailpath,
+            name        = foldername,
+            record_type = "mail_folder")
 
+        # put it into our cache
         if self.folders:
-            self.folders.append(CouchFolder(record))
+            self.folders.append(folder.Couch.CouchFolder(self.db, record, self))
 
     def deletefolder(self, foldername):
-        #TODO
-        self.ui.warn("NOT YET IMPLEMENTED: DELETE FOLDER %s" % foldername)
+        # find folder with that name
+        folder2 = self.getfolder(foldername)
+
+        # remove from database
+        del self.db[folder2.record["_id"]]
+
+        #TODO We should remove all messages in that folder!
+
+        # remove from cache
+        self.folders.remove(folder2)
 
     def getfolder(self, foldername):
         """Return a Folder instance of this Maildir
@@ -136,30 +139,22 @@ class CouchRepository(BaseRepository):
 
         retval = []
 
-        results = self.db.execute_view("mail_folders", "mail")
+        results = self.db.view("mail/mail_folders")
 
         # we only want dirs with the right mailpath
         for rec in results[[self.mailpath]:[self.mailpath, {}]]:
-            print "got dir: " + rec.value["name"]
-            retval.append(folder.Couch.CouchFolder(self.db, rec, self))
-
-            # filter out the folder?
-            foldername = rec.value["name"]
-            if not self.folderfilter(foldername):
-                self.debug("Filtering out '%s'[%s] due to folderfilter"
-                           % (foldername, self))
-                retval[-1].sync_this = False
-            else:
-                retval[-1].sync_this = True
+            #print "got dir: " + rec.value["name"]
+            retval.append(folder.Couch.CouchFolder(self.db, self.db.wrap_record(rec.value), self))
 
         return retval
 
     def getfolders(self):
-        if self.folders == None:
+        """Get all folders"""
+        if self.folders is None:
             self.folders = self._load_folders()
         return self.folders
 
     def forgetfolders(self):
-        """Forgets the cached list of folders, if any.  Useful to run
+        """Forgets the cached list of folders, if any. Useful to run
         after a sync run."""
         self.folders = None

@@ -17,7 +17,7 @@
 
 try:
     from configparser import NoSectionError
-except ImportError: #python2
+except ImportError:     # python2
     from ConfigParser import NoSectionError
 
 from offlineimap.repository.IMAP import IMAPRepository, MappedIMAPRepository
@@ -25,17 +25,8 @@ from offlineimap.repository.Gmail import GmailRepository
 from offlineimap.repository.Maildir import MaildirRepository
 from offlineimap.repository.LocalStatus import LocalStatusRepository
 from offlineimap.error import OfflineImapError
-
-
-# only import CouchDB backend, if DesktopCouch is available
-couchdb_available = False
-try:
-    import desktopcouch.records.server
-    couchdb_available = True
-except ImportError:
-    pass
-if couchdb_available:
-    from offlineimap.repository.Couch import CouchRepository
+from offlineimap.couchlib import Couch
+from offlineimap.repository.Couch import CouchRepository
 
 
 class Repository(object):
@@ -68,15 +59,15 @@ class Repository(object):
             errstr = "Repository type %s not supported" % reqtype
             raise OfflineImapError(errstr, OfflineImapError.ERROR.REPO)
 
-	if reqtype == 'local':
-	    if couchdb_available:
-	        typemap['Couch'] = CouchRepository
+        if reqtype == 'local':
+            if Couch.available:
+                typemap['Couch'] = CouchRepository
 
         # Get repository type
         config = account.getconfig()
         try:
             repostype = config.get('Repository ' + name, 'type').strip()
-        except NoSectionError as e:
+        except NoSectionError:
             errstr = ("Could not find section '%s' in configuration. Required "
                       "for account '%s'." % ('Repository %s' % name, account))
             raise OfflineImapError(errstr, OfflineImapError.ERROR.REPO)

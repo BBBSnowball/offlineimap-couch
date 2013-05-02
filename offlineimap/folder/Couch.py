@@ -15,22 +15,12 @@
 #    along with this program; if not, write to the Free Software
 #    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
 
-import socket
 import time
 import re
-import os
 from .Base import BaseFolder
 from threading import Lock
 
-from desktopcouch.records.server import CouchDatabase
-from desktopcouch.records.record import Record as CouchRecord
-
 import base64
-
-try:
-    from hashlib import md5
-except ImportError:
-    from md5 import md5
 
 try:  # python 2.6 has set() built in
     set
@@ -67,14 +57,14 @@ def gettimeseq():
 class CouchFolder(BaseFolder):
     def __init__(self, db, record, repository):
         self.sep = "/"
-        super(CouchFolder, self).__init__(record.value["name"], repository)
+        super(CouchFolder, self).__init__(record.name, repository)
 
         self.db = db
         self.record = record
         self.messagelist = None
 
-        self.mailpath = record.value["mailpath"]
-        self.folder = record.value["name"]
+        self.mailpath = record.mailpath
+        self.folder = record.name
 
         #"""infosep is the separator between maildir name and flag appendix"""
         #self.re_flagmatch = re.compile('%s2,(\w*)' % self.infosep)
@@ -85,10 +75,10 @@ class CouchFolder(BaseFolder):
         #self._foldermd5 = md5(self.getvisiblename()).hexdigest()
 
     def getroot(self):
-        return self.record.value["mailpath"]
+        return self.mailpath
 
     def getname(self):
-        return self.record.value["name"]
+        return self.name
 
     def get_uidvalidity(self):
         """Retrieve the current connections UIDVALIDITY value
@@ -107,7 +97,7 @@ class CouchFolder(BaseFolder):
 
         retval = {}
 
-        results = self.db.execute_view("mail_items", "mail")
+        results = self.db.view("mail/mail_items", include_docs = True)
 
         #TODO use these...
         maxage = self.config.getdefaultint("Account " + self.accountname,
@@ -123,29 +113,50 @@ class CouchFolder(BaseFolder):
             #if maxsize and (os.path.getsize(os.path.join(
             #            self.getfullname(), filepath)) > maxsize):
             #    continue
-            retval[rec.value["uid"]] = self._decode(rec.value)
+            retval[rec.value["uid"]] = self.db.wrap_record(rec.value)
 
         return retval
+
+
+    @staticmethod
+    def _encode_time(rtime):
+        return rtime and time.strftime("%Y-%m-%d %H:%M:%S", rtime)
+
+    @staticmethod
+    def _decode_time(rtime):
+        return time.strptime(rtime, "%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _encode_flags(flags):
+        return reduce(lambda a,b: a+b, flags, "")
+
+    @staticmethod
+    def _decode_flags(flags):
+        return set(flags)
+
+    @staticmethod
+    def _encode_text(text):
+        return base64.b64encode(text)
+
+    @staticmethod
+    def _decode_text(text):
+        return base64.b64decode(text)
+
 
     def cachemessagelist(self):
         if self.messagelist is None:
             self.messagelist = self._load_messages()
 
     def getmessagelist(self):
+        #TODO do we have to decode it?
         return self.messagelist
 
     def getmessage(self, uid):
         """Return the content of the message"""
-        return base64.b64encode(self.messagelist[uid]['content64'])
+        return self._decode_text(self.messagelist[uid]['content64'])
 
     def getmessagetime(self, uid):
-        return self.messagelist[uid]['rtime']
-
-    def _decode(self, record):
-        """undo stuff we had to do to put the record into the database"""
-        record["flags"] = set(record["flags"])
-        if record["rtime"]:
-            record["rtime"] = time.strptime(record["time"], "%Y-%m-%d %H:%M:%S")
+        return self._decode_time(self.messagelist[uid]['time'])
 
     def savemessage(self, uid, content, flags, rtime):
         """Writes a new message, with the specified uid.
@@ -153,38 +164,52 @@ class CouchFolder(BaseFolder):
         See folder/Base for detail. Note that savemessage() does not
         check against dryrun settings, so you need to ensure that
         savemessage is never called in a dryrun mode."""
-        # This function only ever saves to tmp/,
-        # but it calls savemessageflags() to actually save to cur/ or new/.
+
         self.ui.savemessage('couch', uid, flags, self)
+
+        #TODO what does that mean? (copied from Maildir implementation)
         if uid < 0:
             # We cannot assign a new uid.
             return uid
 
-        if uid in self.messagelist:
+        #TODO we might get duplicate UIDs, if we save messages before the
+        #     cache is initialized
+        if self.messagelist is not None and uid in self.messagelist:
             # We already have it, just update flags.
             self.savemessageflags(uid, flags)
             return uid
 
+        #TODO save message in a more useful format:
+        #     1. text should go into an attachment
+        #     2. text should be split into message text and mail attachments
+        #        (so we can download them individually)
+        #     3. headers should be available in the document,
+        #        either as a list/map or most important ones in special fields:
+        #        subject, from, to, CC&BCC (probably in to), time, ...
+
         x = {
-            "mailpath"  : self.mailpath,
-            "folder"    : self.folder,
-            "uid"       : uid,
-            "content64" : base64.b64encode(content),     # TODO simply fix encoding; simplejson tries to decode it from utf-8 which fails sometimes
-            "flags"     : reduce(lambda a,b: a+b, flags, ""),
-            "rtime"     : rtime and time.strftime("%Y-%m-%d %H:%M:%S", rtime)     # TODO
+            "mailpath"    : self.mailpath,
+            "folder"      : self.folder,
+            "uid"         : uid,
+            # TODO simply fix encoding; simplejson tries to decode it
+            #      from utf-8 which fails sometimes
+            "content64"   : self._encode_text(content),
+            "flags"       : self._encode_flags(flags),
+            "time"        : self._encode_time(rtime),
+            "record_type" : "mail_item"
         }
-        #print repr(x)
 
-        record = CouchRecord(x, "http://bbbsnowball.dyndns.org/couchdb/mail_item")
-        couch_id = self.db.put_record(record)
+        record = self.db.create_record(x)
 
-        if self.messagelist:
+        if self.messagelist is not None:
             self.messagelist[uid] = record
+
+        #print "saving message " + str(uid) + " to folder " + self.getname() + ": " + repr(self.messagelist)
 
         return uid
 
     def getmessageflags(self, uid):
-        return self.messagelist[uid]['flags']
+        return self._decode_flags(self.messagelist[uid]['flags'])
 
     def savemessageflags(self, uid, flags):
         """Sets the specified message's flags to the given set.
@@ -196,7 +221,7 @@ class CouchFolder(BaseFolder):
         so you need to ensure that it is never called in a
         dryrun mode."""
         record = self.messagelist[uid]
-        record.update({"flags" : flags})
+        record.update({"flags" : self._encode_flags(flags)})
 
     def change_message_uid(self, uid, new_uid):
         """Change the message from existing uid to new_uid
@@ -225,6 +250,11 @@ class CouchFolder(BaseFolder):
         :return: Nothing, or an Exception if UID but no corresponding file
                  found.
         """
-        self.db.delete_record(uid)
-        if self.messagelist:
-            del(self.messagelist[uid])
+        # find ID in CouchDB
+        if self.messagelist is None:
+            self.cachemessagelist()
+        _id = self.messagelist[uid]._id
+
+        # delete in database and cache
+        del self.db[_id]
+        del self.messagelist[uid]
