@@ -13,6 +13,7 @@ import os.path
 import urllib
 import time
 import uuid
+import simplejson
 
 try:
     import psutil
@@ -34,18 +35,244 @@ try:
 except ImportError:
     desktopcouch_available = False
 
+class CouchRecord(object):
+    __slots__ = "data", "db"
+
+    def __init__(self, db, data):
+        # we use object.__setattr__ to bypass
+        # our __setattr__ overload
+
+        #self.db   = db
+        object.__setattr__(self, "db", db)
+        #self.data = data
+        object.__setattr__(self, "data", data)
+
+    def __getattr__(self, name):
+        try:
+            return getattr(self.data, name)
+        except AttributeError:
+            if name in self.data:
+                return self.data[name]
+            else:
+                raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        self.data[name] = value
+
+    def __contains__(self, key):
+        return key in self.data
+
+    def __iter__(self, *args):
+        return self.data.__iter__(*args)
+
+    def __len__(self, *args):
+        return self.data.__len__(*args)
+
+    def __getitem__(self, *args):
+        return self.data.__getitem__(*args)
+
+    def __setitem__(self, *args):
+        return self.data.__setitem__(*args)
+
+    def __delitem__(self, *args):
+        return self.data.__delitem__(*args)
+
+    def __str__(self, *args):
+        return self.data.__str__(*args)
+
+    def __repr__(self, *args):
+        return self.data.__repr__(*args)
+
+class CouchView(object):
+    __slots__ = "db", "uri", "params"
+
+    def __init__(self, db, design_doc, viewname, params={}):
+        self.db = db
+        self.uri = design_doc + "/_view/" + viewname
+
+    def execute(self, **params):
+        # merge default and request parameters
+        p = self.params.copy()
+        p.update(params)
+
+        # most parameters should be JSON, boolean or a number
+        # In these cases, we can encode the value as JSON and get a useful result.
+        # Some parameters need strings - we won't ever encode them.
+        string_params = ["stale"]   # never encode
+        json_params = ["key", "keys", "startkey", "endkey"] # always encode
+        params2 = {}
+        for key in p:
+            value = p[key]
+            if key in string_params:
+                # don't touch it
+                pass
+            elif key in json_params or not isinstance(value, str):
+                value = self._encode(value)
+
+            params2[key] = value
+
+        self.db.resource.get_json(self.uri, **params2)
+
+    def _rows(self, response):
+        return map(lambda row: response["rows"])
+
+    def __len__(self):
+        return self.execute(limit=0)["total_rows"]
+
+    def __iter__(self):
+        # get all rows
+        #TODO auto-paginate...
+        return self._rows(self.execute()).__iter__()
+
+    def __getitem__(self, index=None):
+        return self(index, index)
+
+    @staticmethod
+    def _encode(str):
+        return simplejson.JSONEncoder().encode(str)
+
+    def __call__(self, index=None, **params):
+        if index:
+            if isinstance(index, list):
+                params["keys"] = self._encode(index)
+            elif isinstance(index, slice):
+                params["startkey"] = index.start
+                params["endkey"]   = index.stop
+                if "inclusive_end" not in params and "inclusive_end" not in self.params \
+                        or index.step is not None:
+                    # slices exclude the end, so our default value is false
+                    # index.step will be None by default, so we use false in that case
+                    # The default value for CouchDB would be true.
+                    if index.step:
+                        params["inclusive_end"] = True
+                    else:
+                        params["inclusive_end"] = False
+            else:
+                params["key"] = self._encode(index)
+
+        self.execute(**params)
+
+
+class CouchDatabase(object):
+    __slots__ = "couch", "name", "db", "_record_type_base"
+
+    def __init__(self, couch, db):
+        self.couch = couch
+        self.db = db
+        self._record_type_base = None
+
+    def __getattr__(self, name):
+        # redirect to db, if we cannot handle it
+        try:
+            return getattr(self.db, name)
+        except AttributeError:
+            raise AttributeError(name)
+
+    def __contains__(self, key):
+        return key in self.data
+
+    def __iter__(self, *args):
+        return self.db.__iter__(*args)
+
+    def __getitem__(self, *args):
+        return self.db.__getitem__(*args)
+
+    def __setitem__(self, *args):
+        return self.db.__setitem__(*args)
+
+    def __delitem__(self, *args):
+        return self.db.__delitem__(*args)
+
+    def need_design(self, design_doc, design_type, name, code):
+        # design documents must have a special prefix, so CouchDB
+        # will recogize that they are special
+        if not design_doc.startswith("_design/"):
+            design_doc = "_design/" + design_doc
+
+        # retrieve existing document or use an empty map
+        doc = design_doc in self.db and self.db[design_doc] or {}
+
+        # The parts are stored under plural keys (e.g. "views"), but
+        # the user passes the singular form to us, e.g. "view".
+        # We create a map with that key, if it doesn't exist.
+        design_type = design_type + "s"     # view -> views
+        if design_type not in doc:
+            doc[design_type] = {}
+
+        # CouchDB will recreate the index, if we change the design
+        # document. Therefore, we make sure to only touch it, if the
+        # code has really changed.
+        #TODO compare minimized Javascript
+        if name in doc[design_type] and doc[design_type][name] == code:
+            # already exists and is up-to-date
+            pass
+        else:
+            print "INFO: updating design document %s: %s/%s" % (design_doc,design_type,name)
+            doc[design_type][name] = code
+
+            # save (update or create)
+            #TODO do we have to worry about concurrent modification exceptions here?
+            self.db[design_doc] = doc
+
+    def need_view(self, design_doc, viewname, viewcode):
+        self.need_design(design_doc, "view", viewname, viewcode)
+
+    def record_type_base(self):
+        return self._record_type_base or self.couch.record_type_base
+
+    def full_record_type(self, record_type):
+        """expand record_type using self.record_type_base, unless it seems to be a URL"""
+
+        if "://" in record_type:
+            return record_type
+        else:
+            return self.record_type_base().replace("$$", record_type)
+
+    def need_record_view(self, record_type, design_doc, viewname, viewcode):
+        record_type = self.full_record_type(record_type)
+        code = 'function(doc) { if (doc.record_type == \"' + record_type + '\") {\n\t' + viewcode.replace("\n", "\n\t") + '\n}}'
+        self.need_view(design_doc, viewname, {"map": code})
+
+
+    def create_record(self, very_long_name_that_doesnt_clash_with_a_key123 = {}, **kw_args):
+        record = very_long_name_that_doesnt_clash_with_a_key123.copy()
+        record.update(kw_args)
+
+        if "record_type" in record:
+            record["record_type"] = self.full_record_type(record["record_type"])
+        else:
+            print "WARN No record_type set!"
+
+        while True:
+            _id = str(uuid.uuid4())
+            try:
+                self.db[_id] = record
+                break
+            except couchdb.http.ResourceConflict:
+                # try again with another ID
+                pass
+
+        #NOTE python-couchdb sets '_id' and '_rev' on record
+
+        return CouchRecord(self, record)
+
+
+    #def view(self, design_doc, viewname):
+    #    return CouchView(self, design_doc, viewname)
+
+
 class Couch(object):
-    __slots__ = "server", "db", "desktopcouch", "mycouch"
+    __slots__ = "server", "db", "desktopcouch", "mycouch", "record_type_base", "_db_created"
 
     available = couchdb_available
     desktopcouch_available = desktopcouch_available
 
     _re_dbname       = "(?P<dbname>[a-zA-Z0-9_]+)"
-    _re_desktopcouch = re.compile("^desktopcouch://" + _re_dbname + "$")
+    _re_desktopcouch = re.compile("^desktopcouch://" + _re_dbname + "?$")
     _re_file         = re.compile("^file://(?P<dir>.*?)(?:#" + _re_dbname + ")?(?:\?(?P<options>.*))?$")
     _re_connect      = re.compile("^(?P<url>https?://.*?)(?:[#/]" + _re_dbname + ")?$")
 
-    def __init__(self, url):
+    def __init__(self, url, default_dbname=None):
         if not Couch.available:
             raise ImportError("couchdb module must be available")
 
@@ -58,17 +285,34 @@ class Couch(object):
         # find a regular expression that matches the URL
         m = re.match(Couch._re_desktopcouch, url)
         if m:
-            return self._init_desktopcouch(m.group("dbname"))
+            return self._init_desktopcouch(m.group("dbname") or default_dbname)
         
         m = re.match(Couch._re_file, url)
         if m:
-            return self._init_with_dir(m.group("dir"), m.group("dbname"), m.group("options"))
+            return self._init_with_dir(m.group("dir"), m.group("dbname") or default_dbname, m.group("options"))
 
         m = re.match(Couch._re_connect, url)
         if m:
-            return self._init_connection(m.group("url"), m.group("dbname"))
+            return self._init_connection(m.group("url"), m.group("dbname") or default_dbname)
 
         raise ValueError("I don't understand that URL: " + str(url))
+
+    def create(self, *args, **kw_args):
+        db = self.server.create(*args, **kw_args)
+        return db and CouchDatabase(self, db)
+
+    def create_or_use(self, name, *args, **kw_args):
+        if name in self.server:
+            self._db_created = False
+            return CouchDatabase(self, self.server[name])
+        else:
+            db = self.create(name, *args, **kw_args)
+            self._db_created = True
+            return db
+
+    def __getitem__(self, *args, **kw_args):
+        db = self.server.__getitem__(*args, **kw_args)
+        return db and CouchDatabase(self, db)
 
     def _init_desktopcouch(self, dbname):
         if not Couch.desktopcouch_available:
@@ -76,18 +320,18 @@ class Couch(object):
 
         self.desktopcouch = desktopcouch.records.server.CouchDatabase(dbname, create=True)
         self.server = self.desktopcouch.server
-        self.db     = self.desktopcouch.db
+        self.db     = CouchDatabase(self, self.desktopcouch.db)
 
     def _init_with_dir(self, dir, dbname, options):
         self.mycouch = MyCouch(dir, self._decode_options(options))
         self.server   = self.mycouch.server
         if dbname:
-            self.db = self.server.create(dbname)
+            self.db = self.create_or_use(dbname)
 
     def _init_connection(self, url, dbname):
         self.server = couchdb.Server(url)
         if dbname:
-            self.db = self.server.create(dbname)
+            self.db = self.create_or_use(dbname)
 
     def _decode_options(self, options):
         if not options:
@@ -108,6 +352,14 @@ class Couch(object):
             value = urllib.unquote(value)
 
         return [name, value]
+
+    def futon_url(self):
+        """get URL for Futon interface - very useful for debugging"""
+        url = self.mycouch.uri + "_utils/"
+        if self.db:
+            url += "database.html?" + self.db.name
+        return url
+
 
 class MyCouchConfig(object):
     __slots__ = "config"
