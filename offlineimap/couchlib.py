@@ -36,52 +36,74 @@ except ImportError:
     desktopcouch_available = False
 
 class CouchRecord(object):
-    __slots__ = "data", "db"
+    __slots__ = "_data", "_db"
 
     def __init__(self, db, data):
         # we use object.__setattr__ to bypass
         # our __setattr__ overload
 
         #self.db   = db
-        object.__setattr__(self, "db", db)
+        object.__setattr__(self, "_db", db)
         #self.data = data
-        object.__setattr__(self, "data", data)
+        object.__setattr__(self, "_data", data)
 
     def __getattr__(self, name):
         try:
-            return getattr(self.data, name)
+            return getattr(self._data, name)
         except AttributeError:
-            if name in self.data:
-                return self.data[name]
+            if name in self._data:
+                return self._data[name]
             else:
                 raise AttributeError(name)
 
     def __setattr__(self, name, value):
-        self.data[name] = value
+        self._data[name] = value
 
     def __contains__(self, key):
-        return key in self.data
+        return key in self._data
 
     def __iter__(self, *args):
-        return self.data.__iter__(*args)
+        return self._data.__iter__(*args)
 
     def __len__(self, *args):
-        return self.data.__len__(*args)
+        return self._data.__len__(*args)
 
     def __getitem__(self, *args):
-        return self.data.__getitem__(*args)
+        return self._data.__getitem__(*args)
 
     def __setitem__(self, *args):
-        return self.data.__setitem__(*args)
+        return self._data.__setitem__(*args)
 
     def __delitem__(self, *args):
-        return self.data.__delitem__(*args)
+        return self._data.__delitem__(*args)
 
     def __str__(self, *args):
-        return self.data.__str__(*args)
+        return self._data.__str__(*args)
 
     def __repr__(self, *args):
-        return self.data.__repr__(*args)
+        return "CouchRecord(%s)" % self._data.__repr__(*args)
+
+    def update(self, update_map = {}, **kw_args):
+        # combine arguments
+        updates = update_map.copy()
+        updates.update(kw_args)
+
+        if "_id" in updates or "_rev" in updates:
+            raise Exception("Cannot change _id or _rev!")
+
+        #TODO conflict handling: If CouchDB reports
+        #     a conflict, we handle it here, unless
+        #     one of the updated fields has been
+        #     changed
+        #     Furthermore, we could support lambdas
+        #     as the map values, so we can update
+        #     the value even in that case.
+
+        self._data.update(updates)
+        self._db[self._data["_id"]] = self._data
+
+    def get_data(self):
+        return self._data
 
 class CouchDatabase(object):
     __slots__ = "couch", "name", "db", "_record_type_base"
@@ -102,13 +124,29 @@ class CouchDatabase(object):
         return key in self.data
 
     def __iter__(self, *args):
+        # we don't need that because we iterate over the keys
+        #class CouchIter(object):
+        #    __slots__ = "_it", "_db"
+        #    def __init__(self, it, db):
+        #        self._it = it
+        #        self._db = db
+        #    def next(self):
+        #        x = self._it.next()
+        #        print "next: " + repr(x) + ", " + repr(type(x))
+        #        return self._db.wrap_record(x)
+        #    def __iter__(self):
+        #        return CouchIter(self._it.__iter__(), self._db)
+        #return CouchIter(self.db.__iter__(*args), self)
         return self.db.__iter__(*args)
 
     def __getitem__(self, *args):
-        return self.db.__getitem__(*args)
+        return self.wrap_record(
+            self.db.__getitem__(*args))
 
-    def __setitem__(self, *args):
-        return self.db.__setitem__(*args)
+    def __setitem__(self, key, value):
+        if type(value) == CouchRecord:
+            value = value.get_data()
+        return self.db.__setitem__(key, value)
 
     def __delitem__(self, *args):
         return self.db.__delitem__(*args)
@@ -164,6 +202,12 @@ class CouchDatabase(object):
         self.need_view(design_doc, viewname, {"map": code})
 
 
+    def wrap_record(self, json_data):
+        if not isinstance(json_data, CouchRecord):
+            return CouchRecord(self, json_data)
+        else:
+            return json_data
+
     def create_record(self, very_long_name_that_doesnt_clash_with_a_key123 = {}, **kw_args):
         record = very_long_name_that_doesnt_clash_with_a_key123.copy()
         record.update(kw_args)
@@ -173,18 +217,45 @@ class CouchDatabase(object):
         else:
             print "WARN No record_type set!"
 
-        while True:
-            _id = str(uuid.uuid4())
-            try:
-                self.db[_id] = record
-                break
-            except couchdb.http.ResourceConflict:
-                # try again with another ID
-                pass
+        if "_id" in record:
+            # user wants a specific ID
+            _id = record["_id"]
+            self.db[_id] = record
+        else:
+            while True:
+                _id = str(uuid.uuid4())
+                try:
+                    self.db[_id] = record
+                    break
+                except couchdb.http.ResourceConflict:
+                    # try again with another ID
+                    pass
 
         #NOTE python-couchdb sets '_id' and '_rev' on record
 
-        return CouchRecord(self, record)
+        return self.wrap_record(record)
+
+    #TODO I would like to wrap everything automatically, but I think this is hard to
+    #     achieve for view queries because they can return partial documents. Even if
+    #     they have _id and _rev, we cannot use them to update the value unless they
+    #     contain all fields (we would loose the missing fields).
+    #TODO At least, we should wrap __getitem__ and __iter__ for the database object...
+    #def _maybe_wrap(self, data):
+    #    if "_rev" in data and "_id" in data:
+    #        return self.wrap_record(data)
+    #    else:
+    #        return data
+    #def get_row_wrapper(self, wrapper = None):
+    #    if not wrapper:
+    #        return lambda data: CouchRecord(self, data)
+    #    else:
+    #        return lambda data: wrapper(CouchRecord(self, data))
+    #
+    #def query(self, map_fun, reduce_fun=None, language='javascript', wrapper=None, **options):
+    #    return self.db.query(map_fun, reduce_fun, language, self.get_row_wrapper(wrapper), **options)
+    #
+    #def view(self, name, wrapper = None, **options):
+    #    return self.db.view(name, self.get_row_wrapper(wrapper), **options)
 
 
 class Couch(object):

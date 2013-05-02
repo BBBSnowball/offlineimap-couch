@@ -2,6 +2,7 @@
 
 import unittest
 import offlineimap.couchlib
+from offlineimap.couchlib import CouchRecord
 
 class TestCouchlib(unittest.TestCase):
 
@@ -11,16 +12,6 @@ class TestCouchlib(unittest.TestCase):
 
 	def tearDown(self):
 		self.couch.mycouch.shutdown()
-
-	def _get_ip(self):
-		# try to determine the IP of our network card
-		# http://stackoverflow.com/a/166589
-		import socket
-		s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-		s.connect(("google.com",80))
-		ip = s.getsockname()[0]
-		s.close()
-		return ip
 
 	def debug_stop(self):
 		import sys
@@ -123,7 +114,7 @@ class TestCouchlib(unittest.TestCase):
 
 		self.db.create_record(record_type = "mail", mailpath = ["a", "b", "c"], name = "T1")
 
-		self.debug_stop()
+		#self.debug_stop()
 		self.assertEqual(1, view().total_rows)
 
 		self.db.create_record(record_type = "mail", mailpath = ["a", "b", "c2"], name = "T2")
@@ -145,6 +136,31 @@ class TestCouchlib(unittest.TestCase):
 		test(view(), "T1", "T2", "T3", "T4", "T5", "T6")
 		test(view()[[["a","b"]]:[["a","b"],{}]], "T3", "T4")
 		test(view()[[["a","b"]]:[["a","b",{}],{}]], "T3", "T4", "T1", "T2")
+
+	def test_record_wrapping(self):
+		#TODO test with concurrent modification (when we support that)
+
+		self.couch.record_type_base = "http://bbbsnowball.dyndns.org/couchdb/$$"
+		r = self.db.create_record(record_type = "blub", name = "42", _id = "blub")
+
+		self.assertIsInstance(r, CouchRecord)
+		self.assertIsInstance(self.db["blub"], CouchRecord)
+
+	def test_update(self):
+		self.couch.record_type_base = "http://bbbsnowball.dyndns.org/couchdb/$$"
+		r = self.db.create_record(record_type = "blub", name = "42", _id = "blub")
+
+		r.update({"x": 7, "name": "abc"}, position = "upstairs")
+
+		self.assertEqual(7, r.x)
+		self.assertEqual("abc", r.name)
+		self.assertEqual("upstairs", r.position)
+
+		r.update(x = 9)
+
+		self.assertEqual(9, r.x)
+
+		self.assertEqual(9, self.db["blub"].x)
 
 
 def run():
