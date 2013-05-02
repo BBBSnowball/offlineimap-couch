@@ -176,6 +176,19 @@ class CouchFolder(BaseFolder):
             retval[uid] = {'uid': uid, 'flags': self._decode_flags(data['flags']), 'time': self._decode_time(data['time'])}
         return retval
 
+    def uidexists(self, uid):
+        """Returns True if uid exists"""
+        return uid in self.messagelist
+
+    def getmessageuidlist(self):
+        """Gets a list of UIDs.
+        You may have to call cachemessagelist() before calling this function!"""
+        return self.messagelist.keys()
+
+    def getmessagecount(self):
+        """Gets the number of messages."""
+        return len(self.messagelist)
+
     def getmessage(self, uid):
         """Return the content of the message"""
         return self._decode_text(self.messagelist[uid]['content64'])
