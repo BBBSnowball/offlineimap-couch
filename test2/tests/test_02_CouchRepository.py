@@ -7,6 +7,7 @@ import tempfile
 import shutil
 import logging
 import time
+import calendar
 
 from offlineimap.ui import Noninteractive, setglobalui
 from offlineimap.CustomConfig import CustomConfigParser, ConfigHelperMixin
@@ -190,9 +191,9 @@ class TestCouchRepository(unittest.TestCase):
         #     whether it's right...
         self.assertEquals(42, f1.get_uidvalidity())
 
-        time1 = time.strptime("2013-01-30 10:11:12", "%Y-%m-%d %H:%M:%S")
-        time2 = time.strptime("1990-02-05 11:22:33", "%Y-%m-%d %H:%M:%S")
-        time3 = time.strptime("2010-03-25 09:07:01", "%Y-%m-%d %H:%M:%S")
+        time1 = calendar.timegm(time.strptime("2013-01-30 10:11:12", "%Y-%m-%d %H:%M:%S"))
+        time2 = calendar.timegm(time.strptime("1990-02-05 11:22:33", "%Y-%m-%d %H:%M:%S"))
+        time3 = calendar.timegm(time.strptime("2010-03-25 09:07:01", "%Y-%m-%d %H:%M:%S"))
 
         #NOTE We use arbitrary message flags here because the storage layer supports it and I
         #     don't know which ones are valid ;-)
@@ -212,7 +213,8 @@ class TestCouchRepository(unittest.TestCase):
         self.assertEquals(13, x)
 
         # same UID, but different message and in different folder
-        # -> shouldn't be a problem for the storage layer (but Offlineimap might be confused)
+        # -> shouldn't be a problem for the storage layer
+        #    (but Offlineimap might be confused)
         f2.savemessage(14, *messages[0])
 
         # fill the cache
@@ -230,9 +232,20 @@ class TestCouchRepository(unittest.TestCase):
         # f2: 13 => 3, 14 => 0
         # f3: 13 => 3, 17 => 2
 
-        #TODO find out what getmessagelist should return and test it
+        # I don't really know what getmessagelist should do, so I
+        # try to do it similar to the other implementations and
+        # here I test the behaviour of my implementation.
+        def fake_messagelist(uid_to_message):
+            mlist = {}
+            for uid in uid_to_message:
+                mlist[uid] = {'uid': uid, 'flags': uid_to_message[uid][1], 'time': uid_to_message[uid][2]}
+            return mlist
 
-        print repr(f3.getmessagelist())
+        self.assertEquals(fake_messagelist({13: messages[0], 14: messages[1], 15: messages[2]}), f1.getmessagelist())
+        self.assertEquals(fake_messagelist({13: messages[3], 14: messages[0]                 }), f2.getmessagelist())
+        self.assertEquals(fake_messagelist({13: messages[3], 17: messages[2]                 }), f3.getmessagelist())
+
+        # test getters for parts of the message
 
         self.assertEquals(messages[0][0], f1.getmessage(13))
         self.assertEquals(messages[1][0], f1.getmessage(14))

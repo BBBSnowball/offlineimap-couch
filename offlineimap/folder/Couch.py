@@ -16,6 +16,7 @@
 #    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
 
 import time
+import calendar
 import re
 from .Base import BaseFolder
 from threading import Lock
@@ -120,11 +121,14 @@ class CouchFolder(BaseFolder):
 
     @staticmethod
     def _encode_time(rtime):
-        return rtime and time.strftime("%Y-%m-%d %H:%M:%S", rtime)
+        # we use UTC in the database
+        return rtime and time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(rtime))
 
     @staticmethod
     def _decode_time(rtime):
-        return time.strptime(rtime, "%Y-%m-%d %H:%M:%S")
+        # Maildir.getmessagetime returns the result of os.path.getmtime,
+        # which is seconds since the epoch
+        return calendar.timegm(time.strptime(rtime, "%Y-%m-%d %H:%M:%S"))
 
     @staticmethod
     def _encode_flags(flags):
@@ -148,8 +152,29 @@ class CouchFolder(BaseFolder):
             self.messagelist = self._load_messages()
 
     def getmessagelist(self):
-        #TODO do we have to decode it?
-        return self.messagelist
+        # Unfortunately, there is no documentation about the interface
+        # of folders, so I don't know, what I should return. Other
+        # implementations return their internal representation which
+        # is not the same...
+        #
+        # IMAP:        map of uid to {'uid': uid, 'flags': flags, 'time': rtime}
+        # Maildir:     map of uid to {'flags': flags, 'filename': filepath}
+        # UID mapper:  map of uid to {'uid': uid} + whatever the inner type returns
+        # LocalStatus: map of uid to {'uid': uid, 'flags': flags, 'time': rtime}
+        #
+        # type of the fields:
+        # - uid:   long
+        # - flags: set of chars (1-byte strings)
+        # - time:  seconds since epoch (float or whatever os.path.getmtime returns)
+        #
+        # I cannot find any piece of code that uses this function?!
+
+        retval = {}
+        for uid in self.messagelist:
+            data = self.messagelist[uid]
+            uid = long(uid)
+            retval[uid] = {'uid': uid, 'flags': self._decode_flags(data['flags']), 'time': self._decode_time(data['time'])}
+        return retval
 
     def getmessage(self, uid):
         """Return the content of the message"""
