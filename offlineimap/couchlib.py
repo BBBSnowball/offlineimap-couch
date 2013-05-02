@@ -83,76 +83,6 @@ class CouchRecord(object):
     def __repr__(self, *args):
         return self.data.__repr__(*args)
 
-class CouchView(object):
-    __slots__ = "db", "uri", "params"
-
-    def __init__(self, db, design_doc, viewname, params={}):
-        self.db = db
-        self.uri = design_doc + "/_view/" + viewname
-
-    def execute(self, **params):
-        # merge default and request parameters
-        p = self.params.copy()
-        p.update(params)
-
-        # most parameters should be JSON, boolean or a number
-        # In these cases, we can encode the value as JSON and get a useful result.
-        # Some parameters need strings - we won't ever encode them.
-        string_params = ["stale"]   # never encode
-        json_params = ["key", "keys", "startkey", "endkey"] # always encode
-        params2 = {}
-        for key in p:
-            value = p[key]
-            if key in string_params:
-                # don't touch it
-                pass
-            elif key in json_params or not isinstance(value, str):
-                value = self._encode(value)
-
-            params2[key] = value
-
-        self.db.resource.get_json(self.uri, **params2)
-
-    def _rows(self, response):
-        return map(lambda row: response["rows"])
-
-    def __len__(self):
-        return self.execute(limit=0)["total_rows"]
-
-    def __iter__(self):
-        # get all rows
-        #TODO auto-paginate...
-        return self._rows(self.execute()).__iter__()
-
-    def __getitem__(self, index=None):
-        return self(index, index)
-
-    @staticmethod
-    def _encode(str):
-        return simplejson.JSONEncoder().encode(str)
-
-    def __call__(self, index=None, **params):
-        if index:
-            if isinstance(index, list):
-                params["keys"] = self._encode(index)
-            elif isinstance(index, slice):
-                params["startkey"] = index.start
-                params["endkey"]   = index.stop
-                if "inclusive_end" not in params and "inclusive_end" not in self.params \
-                        or index.step is not None:
-                    # slices exclude the end, so our default value is false
-                    # index.step will be None by default, so we use false in that case
-                    # The default value for CouchDB would be true.
-                    if index.step:
-                        params["inclusive_end"] = True
-                    else:
-                        params["inclusive_end"] = False
-            else:
-                params["key"] = self._encode(index)
-
-        self.execute(**params)
-
-
 class CouchDatabase(object):
     __slots__ = "couch", "name", "db", "_record_type_base"
 
@@ -255,10 +185,6 @@ class CouchDatabase(object):
         #NOTE python-couchdb sets '_id' and '_rev' on record
 
         return CouchRecord(self, record)
-
-
-    #def view(self, design_doc, viewname):
-    #    return CouchView(self, design_doc, viewname)
 
 
 class Couch(object):
