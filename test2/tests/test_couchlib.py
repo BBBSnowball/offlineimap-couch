@@ -2,23 +2,15 @@
 
 import unittest
 import offlineimap.couchlib
-import tempfile
-import shutil
 
 class TestCouchlib(unittest.TestCase):
 
 	def setUp(self):
-		self.dir = tempfile.mkdtemp("", "couch_")
-		self.couch = offlineimap.couchlib.Couch("file://" + self.dir, "test")
+		self.couch = offlineimap.couchlib.Couch("tmp://couch_", "test")
 		self.db = self.couch.db
 
 	def tearDown(self):
-		try:
-			self.couch.mycouch.shutdown()
-		except:
-			pass
-
-		shutil.rmtree(self.dir)
+		self.couch.mycouch.shutdown()
 
 	def _get_ip(self):
 		# try to determine the IP of our network card
@@ -32,7 +24,7 @@ class TestCouchlib(unittest.TestCase):
 
 	def debug_stop(self):
 		url = self.couch.futon_url()
-		import re, os, sys, subprocess
+		import re, sys, subprocess
 		m = re.match(".*(127.0.0.1|localhost):([0-9]+)", url)
 		forwarding_process = None
 		if m:
@@ -47,7 +39,7 @@ class TestCouchlib(unittest.TestCase):
 			# netcat only forwards one connection and quits (at least the one I have), so
 			# we use socat instead
 			#forward_cmd = "nc -c \"nc 127.0.0.1 %s\" -s %s -l -p %s" % (port, ip, port)
-			forward_cmd = "socat TCP-LISTEN:%s,fork,bind=%s TCP:127.0.0.1:%s" % (port, ip, port)
+			#forward_cmd = "socat TCP-LISTEN:%s,fork,bind=%s TCP:127.0.0.1:%s" % (port, ip, port)
 
 			# we want to kill it later, so we need to remember the PID
 			#pidfile = tempfile.mktemp("", "socat_pid_")

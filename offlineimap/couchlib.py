@@ -197,6 +197,7 @@ class Couch(object):
     _re_desktopcouch = re.compile("^desktopcouch://" + _re_dbname + "?$")
     _re_file         = re.compile("^file://(?P<dir>.*?)(?:#" + _re_dbname + ")?(?:\?(?P<options>.*))?$")
     _re_connect      = re.compile("^(?P<url>https?://.*?)(?:[#/]" + _re_dbname + ")?$")
+    _re_tmp          = re.compile("^tmp://(?P<name>.*?)(?:#" + _re_dbname + ")?(?:\?(?P<options>.*))?$")
 
     def __init__(self, url, default_dbname=None):
         if not Couch.available:
@@ -220,6 +221,10 @@ class Couch(object):
         m = re.match(Couch._re_connect, url)
         if m:
             return self._init_connection(m.group("url"), m.group("dbname") or default_dbname)
+
+        m = re.match(Couch._re_tmp, url)
+        if m:
+            return self._init_tmp(m.group("name"), m.group("dbname") or default_dbname, m.group("options"))
 
         raise ValueError("I don't understand that URL: " + str(url))
 
@@ -252,7 +257,24 @@ class Couch(object):
         self.mycouch = MyCouch(dir, self._decode_options(options))
         self.server   = self.mycouch.server
         if dbname:
-            self.db = self.create_or_use(dbname)
+            self.db = self.create_or_use(dbname)#
+
+    def _init_tmp(self, name, dbname, options):
+        # we need some additional libraries that
+        # we import here because we don't usually
+        # need them
+        import tempfile
+        import shutil
+
+        # make temporary directory
+        dir = tempfile.mkdtemp("", name)
+
+        # rest is the same as for directories
+        self._init_with_dir(dir, dbname, options)
+
+        # remove the directory after the server shuts down
+        #NOTE only works, if someone calls mycouch.shutdown
+        self.mycouch.on_shutdown(lambda: shutil.rmtree(dir))
 
     def _init_connection(self, url, dbname):
         self.server = couchdb.Server(url)
@@ -349,7 +371,7 @@ class MyCouchConfig(object):
 
 class MyCouch(object):
     """start a private CouchDB instance in a directory"""
-    __slots__ = "dir", "server", "uri", "credentials", "additional_options", "_info"
+    __slots__ = "dir", "server", "uri", "credentials", "additional_options", "_info", "_shutdown_actions"
 
 
     def get_option(self, name, default=None):
@@ -384,6 +406,8 @@ class MyCouch(object):
         self._info       = None
         self.server      = None
         self.uri         = None
+
+        self._shutdown_actions = []
 
         # we need some infos for _is_running, so we try
         # to load them now
@@ -833,6 +857,9 @@ class MyCouch(object):
         #     that value. This may be a problem because the Couch class uses a copy.
         self._connect()
 
+    def on_shutdown(self, action):
+        self._shutdown_actions.append(action)
+
     def shutdown(self):
         cmd = "/usr/bin/couchdb"
 
@@ -845,6 +872,10 @@ class MyCouch(object):
 
         print "INFO Shutting down CouchDB instance in %s: %s" % (self.dir, cmd)
         os.system(cmd)
+
+        for action in self._shutdown_actions:
+            action()
+        self._shutdown_actions = []
 
 # for desktopcouch:
 #NOTE Empty values aren't useless because they can delete values set
