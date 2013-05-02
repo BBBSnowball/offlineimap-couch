@@ -13,7 +13,7 @@ import os.path
 import urllib
 import time
 import uuid
-import simplejson
+#import simplejson
 
 try:
     import psutil
@@ -307,6 +307,95 @@ class Couch(object):
         if self.db:
             url += "database.html?" + self.db.name
         return url
+
+    def debug_url(self, local = False):
+        """forward public port to CouchDB and give us the link; returned object must be used with 'with' statement"""
+        return CouchForwarder(self, local)
+
+class CouchForwarder(object):
+    __slots__ = "couch", "local", "_active", "_public_ip", "_forwarding_process"
+
+    def __init__(self, couch, local):
+        self.couch = couch
+        self.local = local
+
+        self._active = False
+        self._public_ip = None
+        self._forwarding_process = None
+
+    def _ensure_active(self):
+        if not self.local and not self._active:
+            raise Exception("Please use this object in a 'with' statement!")
+
+    def couch_url(self):
+        self._ensure_active()
+
+        url = self.couch.mycouch.uri
+        if self._public_ip:
+            url = re.sub("127.0.0.1|localhost", self._public_ip, url)
+        return url
+
+    def futon_url(self):
+        """get URL for Futon interface - very useful for debugging"""
+        url = self.couch_url() + "_utils/"
+        if self.couch.db:
+            url += "database.html?" + self.couch.db.name
+        return url
+
+    def __str__(self):
+        if self._active:
+            return self.futon_url()
+        else:
+            return "CouchForwarder(inactive)"
+ 
+    def _get_ip(self):
+        # try to determine the IP of our network card
+        # http://stackoverflow.com/a/166589
+
+        # imported here because this class is only used for debugging, so we
+        # usually don't need those imports
+        import socket
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("google.com",80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+
+    def __enter__(self):
+        # imported here because this class is only used for debugging, so we
+        # usually don't need those imports
+        import subprocess
+
+        url = self.couch.mycouch.uri
+        is_local = re.match(".*(127.0.0.1|localhost):([0-9]+)", url)
+        if is_local:
+            print "Forwarding the connection from a public port"
+            # It's a local connection, so we may have to
+            # forward the port. We start a forwarding process
+            # in any case. It will fail to start, if the port
+            # is already used, which most likely means that
+            # CouchDB listens on a public port.
+            ip = self._get_ip()
+            port = is_local.group(2)
+
+            self._forwarding_process = subprocess.Popen(
+                ["socat", "TCP-LISTEN:%s,fork,bind=%s" % (port, ip), "TCP:127.0.0.1:%s" % port])
+
+            self._public_ip = ip
+
+        self._active = True
+
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self._active = False
+        self._public_ip = None
+
+        # stop forwarding process
+        if self._forwarding_process:
+            self._forwarding_process.terminate()
+            self._forwarding_process = None
 
 
 class MyCouchConfig(object):

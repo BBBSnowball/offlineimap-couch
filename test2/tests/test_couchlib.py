@@ -23,47 +23,17 @@ class TestCouchlib(unittest.TestCase):
 		return ip
 
 	def debug_stop(self):
-		url = self.couch.futon_url()
-		import re, sys, subprocess
-		m = re.match(".*(127.0.0.1|localhost):([0-9]+)", url)
-		forwarding_process = None
-		if m:
-			print "Forwarding the connection"
-			# It's a local connection, so we may have to
-			# forward the port. We start a forwarding process
-			# in any case. It will fail to start, if the port
-			# is already used, which most likely means that
-			# CouchDB listens on a public port.
-			ip = self._get_ip()
-			port = m.group(2)
-			# netcat only forwards one connection and quits (at least the one I have), so
-			# we use socat instead
-			#forward_cmd = "nc -c \"nc 127.0.0.1 %s\" -s %s -l -p %s" % (port, ip, port)
-			#forward_cmd = "socat TCP-LISTEN:%s,fork,bind=%s TCP:127.0.0.1:%s" % (port, ip, port)
+		import sys
 
-			# we want to kill it later, so we need to remember the PID
-			#pidfile = tempfile.mktemp("", "socat_pid_")
-			#cmd = "{ %s & } ; echo $! >%s" % (forward_cmd, pidfile)
-			#TODO kill this process later...
-			#os.system(cmd)
-
-			forwarding_process = subprocess.Popen(["socat", "TCP-LISTEN:%s,fork,bind=%s" % (port, ip), "TCP:127.0.0.1:%s" % port])
-
-			url = re.sub("127.0.0.1|localhost", ip, url)
-
-		print "====================="
-		print "     DEBUG STOP      "
-		print "====================="
-		print "You can access Futon using this URL:"
-		print url
-		print ""
-		print "Please press ENTER to continue."
-		sys.stdin.readline()
-
-		# stop forwarding process
-		if forwarding_process:
-			forwarding_process.terminate()
-
+		with self.couch.debug_url() as url:
+			print "====================="
+			print "     DEBUG STOP      "
+			print "====================="
+			print "You can access Futon using this URL:"
+			print url.futon_url()
+			print ""
+			print "Please press ENTER to continue."
+			sys.stdin.readline()
 
 	def test_put(self):
 		self.db["test1"] = {"blub": 42}
@@ -153,7 +123,7 @@ class TestCouchlib(unittest.TestCase):
 
 		self.db.create_record(record_type = "mail", mailpath = ["a", "b", "c"], name = "T1")
 
-		#self.debug_stop()
+		self.debug_stop()
 		self.assertEqual(1, view().total_rows)
 
 		self.db.create_record(record_type = "mail", mailpath = ["a", "b", "c2"], name = "T2")
