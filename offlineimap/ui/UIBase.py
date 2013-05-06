@@ -82,8 +82,11 @@ class UIBase(object):
         ch.setFormatter(self.formatter)
         # add the handlers to the logger
         self.logger.addHandler(ch)
-        self.logger.info(offlineimap.banner)
+        self.print_banner()
         return ch
+
+    def print_banner(self):
+        self.logger.info(offlineimap.banner)
 
     def setlogfile(self, logfile):
         """Create file handler which logs to file"""

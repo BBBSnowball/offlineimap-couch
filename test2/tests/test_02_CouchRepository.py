@@ -38,12 +38,16 @@ class FakeAccount(ConfigHelperMixin):
     def getsection(self):
         return 'Account ' + self.getname()
 
+# set this here, so pylint knows that the variable exists
+couch = None
+
 def setUpModule():
     logging.info("Set Up test module %s" % __name__)
 
     # set UI
     # We only do that once because it prints a banner.
     config = CustomConfigParser()
+    Noninteractive.Basic.print_banner = lambda self: None
     setglobalui(Noninteractive.Basic(config, logging.INFO))
 
     # start temporary CouchDB instance
