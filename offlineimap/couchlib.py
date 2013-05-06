@@ -267,7 +267,7 @@ class Couch(object):
     _re_dbname       = "(?P<dbname>[a-zA-Z0-9_]+)"
     _re_desktopcouch = re.compile("^desktopcouch://" + _re_dbname + "?$")
     _re_file         = re.compile("^file://(?P<dir>.*?)(?:#" + _re_dbname + ")?(?:\?(?P<options>.*))?$")
-    _re_connect      = re.compile("^(?P<url>https?://.*?)(?:[#/]" + _re_dbname + ")?$")
+    _re_connect      = re.compile("^(?P<url>https?://[^#]*)(?:#" + _re_dbname + ")?$")
     _re_tmp          = re.compile("^tmp://(?P<name>.*?)(?:#" + _re_dbname + ")?(?:\?(?P<options>.*))?$")
 
     def __init__(self, url, default_dbname=None):
