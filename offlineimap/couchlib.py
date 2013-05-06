@@ -369,7 +369,7 @@ class Couch(object):
             self.db = self.create_or_use(dbname)
 
         # name: use uri without password
-        self._name = re.sub("[^/]+@", "", self.mycouch.uri)
+        self._name = re.sub("[^/]+@", "", url)
 
     def _decode_options(self, options):
         if not options:
