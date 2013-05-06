@@ -8,3 +8,8 @@ offlineimap.1
 .*.swo
 *.html
 *~
+
+/test2/testmail*.tar.bz2
+/test2/*.deb
+/test2/testmail-to-dovecot2.conf
+/testmail.tar.bz2

@@ -128,7 +128,11 @@ class CouchFolder(BaseFolder):
     def _decode_time(rtime):
         # Maildir.getmessagetime returns the result of os.path.getmtime,
         # which is seconds since the epoch
-        return calendar.timegm(time.strptime(rtime, "%Y-%m-%d %H:%M:%S"))
+        try:
+            return rtime and calendar.timegm(time.strptime(rtime, "%Y-%m-%d %H:%M:%S"))
+        except:
+            print "ERROR: _decode_time failed for " + repr(rtime)
+            raise
 
     @staticmethod
     def _encode_flags(flags):

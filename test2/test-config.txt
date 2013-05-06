@@ -57,6 +57,7 @@ diff -ru0 /etc/dovecot.bak/conf.d/auth-static.conf.ext /etc/dovecot/conf.d/auth-
 EOF
 
 adduser --system --ingroup mail --no-create-home --disabled-login --uid 900 vmail
+sudo adduser benny mail 	# replace 'benny' by the user you will use to run the tests
 
 /etc/init.d/dovecot restart
 
@@ -82,4 +83,30 @@ gnome-keyring-daemon
 -> gnome-keyring doesn't work without a display and desktopcouch needs it
   http://superuser.com/questions/141036/use-of-gnome-keyring-daemon-without-x
   https://bbs.archlinux.org/viewtopic.php?id=135448
+==== END DON'T DO ====
+
+
+# For me that was way too much for a usual test, so I trimmed it down a bit:
+# Put it into a real Maildir
+python offlineimap.py -ctest2/testmail-to-maildir.conf
+python /media/nfs/development/couch/tools/offlineimap/test2/thin-maildir.py maildir2 maildir3 0.1
+cp /root/testmail/maildir2/gmane/mail/imap/binc/announce/new/* /root/testmail/maildir3/gmane/mail/imap/binc/announce/new
+cp /root/testmail/maildir2/ilohamail/testers/new/*             /root/testmail/maildir3/ilohamail/testers/new
+find /root/testmail/maildir3/ -type d -name new | while read dir ; do [ "$(ls -1 "$dir"|wc -l)" -lt 5 ] && echo "=== $dir ===" && ls -l "$dir" ; done
+# --> INBOX/new should be the only empty folder
+find maildir4/ -type f|wc -l
+# --> 5085 mails in there
+
+python /media/nfs/development/couch/tools/offlineimap/test2/thin-maildir.py maildir2 maildir5 0.03
+# --> 1589 mails --> perfect :-)
+# put it into Dovecot
+python offlineimap.py -ctest2/testmail-to-dovecot2.conf
+
+==== DON'T DO ====
+cp /root/testmail/maildir2 -r /root/testmail/maildir3
+find /root/testmail/maildir3/ -type f -name "*8*" -exec rm {} \;
+# --> about 5000 mails but many empty folders
+find /root/testmail/maildir3/ -type d -name new | while read dir ; do [ "$(ls -1 "$dir"|wc -l)" -lt 10 ] && echo "=== $dir ===" && ls -l "$dir" && cp /root/testmail/maildir2/$dir/*7* "$dir" ; done
+find -type f|wc -l
+# --> almost 50000 :-(
 ==== END DON'T DO ====

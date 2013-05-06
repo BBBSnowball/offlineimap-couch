@@ -25,7 +25,8 @@ from offlineimap.repository.Gmail import GmailRepository
 from offlineimap.repository.Maildir import MaildirRepository
 from offlineimap.repository.LocalStatus import LocalStatusRepository
 from offlineimap.error import OfflineImapError
-from offlineimap.couchlib import Couch
+# we would like to import Couch, but that conflicts with the module Couch (the repository)
+import offlineimap.couchlib as couchlib
 from offlineimap.repository.Couch import CouchRepository
 
 
@@ -60,7 +61,7 @@ class Repository(object):
             raise OfflineImapError(errstr, OfflineImapError.ERROR.REPO)
 
         if reqtype == 'local':
-            if Couch.available:
+            if couchlib.Couch.available:
                 typemap['Couch'] = CouchRepository
 
         # Get repository type
