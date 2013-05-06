@@ -14,12 +14,13 @@ import urllib
 import time
 import uuid
 #import simplejson
+import logging
 
 try:
     import psutil
     psutil_available = True
 except ImportError:
-    print "WARN: psutil not available, please install with 'easy_install psutil' or 'apt-get install python-psutil'"
+    logging.getLogger(__name__).warn("psutil not available, please install with 'easy_install psutil' or 'apt-get install python-psutil'")
     psutil_available = False
 
 try:
@@ -175,7 +176,7 @@ class CouchDatabase(object):
             # already exists and is up-to-date
             pass
         else:
-            print "INFO: updating design document %s: %s/%s" % (design_doc,design_type,name)
+            logging.getLogger(__name__).info("updating design document %s: %s/%s", design_doc, design_type, name)
             doc[design_type][name] = code
 
             # save (update or create)
@@ -215,7 +216,7 @@ class CouchDatabase(object):
         if "record_type" in record:
             record["record_type"] = self.full_record_type(record["record_type"])
         else:
-            print "WARN No record_type set!"
+            logging.getLogger(__name__).warn("record_type not set on a record")
 
         if "_id" in record:
             # user wants a specific ID
@@ -259,7 +260,7 @@ class CouchDatabase(object):
 
 
 class Couch(object):
-    __slots__ = "server", "db", "desktopcouch", "mycouch", "record_type_base", "_db_created"
+    __slots__ = "server", "db", "desktopcouch", "mycouch", "record_type_base", "_db_created", "_name"
 
     available = couchdb_available
     desktopcouch_available = desktopcouch_available
@@ -299,7 +300,14 @@ class Couch(object):
 
         raise ValueError("I don't understand that URL: " + str(url))
 
+    def __str__(self):
+        name = self._name
+        if self.db:
+            name += "#" + self.dbname
+        return "Couch(%s)" % name
+
     def create(self, *args, **kw_args):
+        logging.getLogger(__name__).info("Creating couch database '%s' in '%s'", args[0], self)
         db = self.server.create(*args, **kw_args)
         return db and CouchDatabase(self, db)
 
@@ -323,12 +331,14 @@ class Couch(object):
         self.desktopcouch = desktopcouch.records.server.CouchDatabase(dbname, create=True)
         self.server = self.desktopcouch.server
         self.db     = CouchDatabase(self, self.desktopcouch.db)
+        self._name  = "desktopcouch://"
 
     def _init_with_dir(self, dir, dbname, options):
         self.mycouch = MyCouch(dir, self._decode_options(options))
         self.server   = self.mycouch.server
         if dbname:
-            self.db = self.create_or_use(dbname)#
+            self.db = self.create_or_use(dbname)
+        self._name = "file://" + dir
 
     def _init_tmp(self, name, dbname, options):
         # we need some additional libraries that
@@ -343,6 +353,12 @@ class Couch(object):
         # rest is the same as for directories
         self._init_with_dir(dir, dbname, options)
 
+        # set a different name
+        #NOTE This is not a valid Couch uri. It is only used
+        #     to inform the user, so we prefer 'more useful
+        #     information' over 'machine-readable'.
+        self._name = "tmp://" + dir
+
         # remove the directory after the server shuts down
         #NOTE only works, if someone calls mycouch.shutdown
         self.mycouch.on_shutdown(lambda: shutil.rmtree(dir))
@@ -351,6 +367,9 @@ class Couch(object):
         self.server = couchdb.Server(url)
         if dbname:
             self.db = self.create_or_use(dbname)
+
+        # name: use uri without password
+        self._name = re.sub("[^/]+@", "", self.mycouch.uri)
 
     def _decode_options(self, options):
         if not options:
@@ -441,7 +460,7 @@ class CouchForwarder(object):
         url = self.couch.mycouch.uri
         is_local = re.match(".*(127.0.0.1|localhost):([0-9]+)", url)
         if is_local:
-            print "Forwarding the connection from a public port"
+            logging.getLogger(__name__).info("Forwarding the connection from a public port")
             # It's a local connection, so we may have to
             # forward the port. We start a forwarding process
             # in any case. It will fail to start, if the port
@@ -509,15 +528,18 @@ class MyCouchConfig(object):
                         # not possible because CouchDB splits at "\s*=\s*" and then uses implode("=")
                         # which only adds the equal sign but not the spaces
                         # see couch_config.erl, function parse_ini_file, line 236
-                        print "WARN The value for '%s:%s' contains a space next to an equal sign. " \
-                              + "Due to a bug in CouchDB the space will be lost" % (section_name, key)
+                        logging.getLogger(__name__).warn(
+                            "The value for '%s:%s' contains a space next to an equal sign. "
+                              + "Due to a bug in CouchDB the space will be lost", section_name, key)
                     elif re.match("[ \t];", value):
                         # not possible because CouchDB treats this as a comment
-                        print "WARN Part of this value will be treated as a comment and ignored: %s" % value
+                        logging.getLogger(__name__).warn(
+                            "Part of the value for '%s:%s' will be treated as a comment and ignored: %r", section_name, key, value)
                     elif re.match("\r\n|\n|\r|\032", value):
                         # CouchDB supports multiline values, but it will convert newline to space,
                         # so that doesn't help us here.
-                        print "WARN Your value contains a newline which will be replaced by a space."
+                        logging.getLogger(__name__).warn(
+                            "The value for '%s:%s' contains a newline which will be replaced by a space.", section_name, key)
 
                         # make sure there is a space after every newline, so CouchDB will treat
                         # it as a multiline value
@@ -580,9 +602,10 @@ class MyCouch(object):
             if not self.get_boolean_option("any"):
                 # warn the user, if the additional options are different from the options the user wants
                 if self._info["additional_options"] != self._canonical_couch_option_representation():
-                    print "WARN The server is already running, so we cannot change its options!"
-                    print "  requested options: " + self._canonical_couch_option_representation()
-                    print "  used options:      " + self._info["additional_options"]
+                    logging.getLogger(__name__).warn(
+                        "The server is already running, so we cannot change its options!\n" +
+                        "  requested options: " + self._canonical_couch_option_representation() + "\n" +
+                        "  used options:      " + self._info["additional_options"])
 
         self._connect()
 
@@ -630,8 +653,9 @@ class MyCouch(object):
         try:
             return int(pid)
         except ValueError:
-            print "WARN invalid pidfile for CouchDB"
-            print "  contents of '%s': " % pidfile + repr(pid)
+            logging.getLogger(__name__).warn(
+                "invalid pidfile for CouchDB\n" +
+                "  contents of '%s': " % pidfile + repr(pid))
             return None
 
     def _is_running(self):
@@ -660,7 +684,8 @@ class MyCouch(object):
                 # We have saved the name -> use that one
                 right_name = self._info["process_name"]
             else:
-                print "WARN We haven't saved the name of the process, so we have to guess."
+                logging.getLogger(__name__).warn(
+                    "We haven't saved the name of the process, so we have to guess.")
             if p.name != right_name:
                 # It's a different process
                 #print "DEBUG not running - name is '%s' instead of '%s'" % (p.name, right_name)
@@ -673,9 +698,10 @@ class MyCouch(object):
 
             if self._info and "process_cmdline" in self._info \
                     and repr(p.cmdline) != self._info["process_cmdline"]:
-                print "INFO Command line of CouchDB process is different than the one we expected."
-                print "  expected: " + self._info["process_cmdline"]
-                print "  actual:   " + repr(p.cmdline)
+                logging.getLogger(__name__).info(
+                    "Command line of CouchDB process is different than the one we expected.\n" +
+                    "  expected: " + self._info["process_cmdline"] + "\n" +
+                    "  actual:   " + repr(p.cmdline))
 
             try:
                 # get executable path because that fails, if the
@@ -689,7 +715,8 @@ class MyCouch(object):
             # We are quite confident that it is the right process
             return True
         else:
-            print "ERROR We need psutil to test whether CouchDB is running. Please install it! Using (very) optimistic hypothesis instead..."
+            logging.getLogger(__name__).error(
+                "We need psutil to test whether CouchDB is running. Please install it! Using (very) optimistic hypothesis instead...")
             return True
 
     def _read_info(self):
@@ -783,7 +810,7 @@ class MyCouch(object):
         self._cleanup_file("couch.pid")
         self._cleanup_file("couch.uri")
 
-        print "INFO Starting CouchDB instance in %s: %s" % (self.dir, cmd)
+        logging.getLogger(__name__).info("Starting CouchDB instance in %s: %s", self.dir, cmd)
         os.system(cmd)
 
         # wait for the process
@@ -799,7 +826,8 @@ class MyCouch(object):
 
         if not pid:
             # timeout -> we couldn't start the process
-            print "WARN pid file hasn't been created before the timeout, so our best bet is that the server is not starting for some reason"
+            logging.getLogger(__name__).warn(
+                "pid file hasn't been created before the timeout, so our best bet is that the server is not starting for some reason")
             return False
 
         # save name of the process
@@ -1030,7 +1058,7 @@ class MyCouch(object):
         cmd += " -d"    # shutdown
         cmd += " -p " + self.path_for("couch.pid", "shell")
 
-        print "INFO Shutting down CouchDB instance in %s: %s" % (self.dir, cmd)
+        logging.getLogger(__name__).warn("Shutting down CouchDB instance in %s: %s", self.dir, cmd)
         os.system(cmd)
 
         for action in self._shutdown_actions:
